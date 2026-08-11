@@ -18,26 +18,75 @@ logInfo('app.js loaded and running');
 // ---------- Overlay system (sheets + dialogs share one backdrop) ----------
 const backdrop = document.getElementById('backdrop');
 
-function openOverlay(id) {
-  document.querySelectorAll('.sheet, .dialog').forEach((el) => el.classList.add('hidden'));
-  document.getElementById(id).classList.remove('hidden');
+// Dialogs that need to settle a pending promise if they are dismissed by a
+// backdrop tap rather than by one of their own buttons. Without this, a
+// backdrop dismiss skips the opener's cleanup(), so the promise never
+// resolves (the await sits there forever) and the button handlers stay
+// attached to the shared dialog for the next caller to trip over.
+const dialogDismissHandlers = new Map();
+
+function anyOverlayVisible() {
+  return !!document.querySelector('.sheet:not(.hidden), .dialog:not(.hidden)');
+}
+function showBackdrop() {
   backdrop.classList.remove('hidden');
   requestAnimationFrame(() => backdrop.classList.add('visible'));
 }
+
+// Sheets are mutually exclusive: two stacked bottom sheets is not a state
+// this UI has a way out of, so opening one clears everything else.
+function openOverlay(id) {
+  document.querySelectorAll('.sheet, .dialog').forEach((el) => el.classList.add('hidden'));
+  document.getElementById(id).classList.remove('hidden');
+  showBackdrop();
+}
+
+// Dialogs deliberately do NOT hide sheets. A confirmation raised from inside
+// a sheet used to dismiss that sheet, so confirming a delete dropped you back
+// to the map and the sheet had to be reopened for every single item, and
+// setting the storage folder gave no way to see whether it had taken without
+// reopening Settings. The CSS already stacks these correctly on its own
+// (.sheet is z-index 650, .dialog is 700), so nothing here needs to move; the
+// blanket hide in openOverlay was the only thing in the way.
+//
+// Other dialogs are still cleared, because the dialogs share #dialog-confirm
+// and several flows deliberately chain one dialog into the next.
+function openDialog(id) {
+  document.querySelectorAll('.dialog').forEach((el) => el.classList.add('hidden'));
+  document.getElementById(id).classList.remove('hidden');
+  showBackdrop();
+}
 function closeOverlay(id) {
   document.getElementById(id).classList.add('hidden');
+  dialogDismissHandlers.delete(id);
+  // The backdrop is shared, so it can only be torn down once nothing is left
+  // sitting on top of it. Closing a dialog over an open sheet used to strip
+  // the dimming out from under the sheet that was still showing.
+  if (anyOverlayVisible()) return;
   backdrop.classList.remove('visible');
-  setTimeout(() => backdrop.classList.add('hidden'), 200);
+  setTimeout(() => {
+    // Re-checked on the way out: something may have opened during the 200ms
+    // fade, in which case hiding the backdrop now would leave it undimmed.
+    if (!anyOverlayVisible()) backdrop.classList.add('hidden');
+  }, 200);
 }
 function toggleSheet(id) {
   const el = document.getElementById(id);
   if (el.classList.contains('hidden')) openOverlay(id);
   else closeOverlay(id);
 }
+// Dismisses only the topmost layer. Closing everything at once would put the
+// sheet-vanishes-under-you problem straight back via a different gesture:
+// tapping beside a confirmation would take the sheet with it.
 backdrop.onclick = () => {
-  document.querySelectorAll('.sheet, .dialog').forEach((el) => {
-    if (!el.classList.contains('hidden')) closeOverlay(el.id);
-  });
+  const topDialog = document.querySelector('.dialog:not(.hidden)');
+  if (topDialog) {
+    const dismiss = dialogDismissHandlers.get(topDialog.id);
+    if (dismiss) dismiss();
+    else closeOverlay(topDialog.id);
+    return;
+  }
+  document.querySelectorAll('.sheet:not(.hidden)').forEach((el) => closeOverlay(el.id));
 };
 document.querySelectorAll('.sheet-close').forEach((btn) => {
   btn.onclick = () => closeOverlay(btn.dataset.target);
@@ -116,7 +165,7 @@ async function refreshBackupFilesList() {
 
 function askStorageFolder() {
   return new Promise((resolve) => {
-    openOverlay('dialog-storage-folder');
+    openDialog('dialog-storage-folder');
     const docsBtn = document.getElementById('btn-folder-documents');
     const dlBtn = document.getElementById('btn-folder-downloads');
     const browseBtn = document.getElementById('btn-folder-browse');
@@ -124,6 +173,9 @@ function askStorageFolder() {
     docsBtn.onclick = () => { cleanup(); resolve({ directory: 'DOCUMENTS', relativePath: '', label: 'Documents/Datum' }); };
     dlBtn.onclick = () => { cleanup(); resolve({ directory: 'EXTERNAL_STORAGE', relativePath: '', label: 'Downloads/Datum' }); };
     browseBtn.onclick = async () => { cleanup(); resolve(await browseForFolder()); };
+    // Backdrop tap leaves the folder unchanged. Callers treat null as "no
+    // selection made" already, which is the same outcome as a failed browse.
+    dialogDismissHandlers.set('dialog-storage-folder', () => { cleanup(); resolve(null); });
   });
 }
 
@@ -229,12 +281,12 @@ refreshStorageUI();
 // ---------- First-launch onboarding ----------
 if (!localStorage.getItem('onboardingSeen')) {
   localStorage.setItem('onboardingSeen', 'true');
-  openOverlay('dialog-onboarding-offline');
+  openDialog('dialog-onboarding-offline');
 }
 document.getElementById('btn-onboarding-offline-ok').onclick = () => {
   closeOverlay('dialog-onboarding-offline');
   if (!Storage.isStorageConfigured()) {
-    setTimeout(() => openOverlay('dialog-onboarding-storage'), 250);
+    setTimeout(() => openDialog('dialog-onboarding-storage'), 250);
   }
 };
 document.getElementById('btn-onboarding-storage-later').onclick = () => closeOverlay('dialog-onboarding-storage');
@@ -299,12 +351,14 @@ function askName(title, defaultValue) {
     document.getElementById('name-prompt-title').textContent = title;
     const input = document.getElementById('name-prompt-input');
     input.value = defaultValue;
-    openOverlay('dialog-name-prompt');
+    openDialog('dialog-name-prompt');
     const confirmBtn = document.getElementById('btn-name-prompt-confirm');
     const cancelBtn = document.getElementById('btn-name-prompt-cancel');
     const cleanup = () => { confirmBtn.onclick = null; cancelBtn.onclick = null; closeOverlay('dialog-name-prompt'); };
     confirmBtn.onclick = () => { const v = input.value.trim() || defaultValue; cleanup(); resolve(v); };
     cancelBtn.onclick = () => { cleanup(); resolve(null); };
+    // Backdrop tap means Cancel. Callers already branch on null.
+    dialogDismissHandlers.set('dialog-name-prompt', () => { cleanup(); resolve(null); });
   });
 }
 
@@ -312,12 +366,20 @@ function askConfirm(title, message) {
   return new Promise((resolve) => {
     document.getElementById('confirm-title').textContent = title;
     document.getElementById('confirm-message').textContent = message;
-    openOverlay('dialog-confirm');
     const yesBtn = document.getElementById('btn-confirm-yes');
     const noBtn = document.getElementById('btn-confirm-no');
+    // Both buttons are set explicitly rather than assuming whatever the last
+    // caller left behind. #dialog-confirm is shared with showAlert(), which
+    // relabels Yes to OK and hides No; saving and restoring that state across
+    // two callers is fragile, so each opener states in full what it wants.
+    yesBtn.textContent = 'Yes';
+    noBtn.classList.remove('hidden');
+    openDialog('dialog-confirm');
     const cleanup = () => { yesBtn.onclick = null; noBtn.onclick = null; closeOverlay('dialog-confirm'); };
     yesBtn.onclick = () => { cleanup(); resolve(true); };
     noBtn.onclick = () => { cleanup(); resolve(false); };
+    // Tapping the backdrop counts as declining, matching Cancel.
+    dialogDismissHandlers.set('dialog-confirm', () => { cleanup(); resolve(false); });
   });
 }
 
@@ -1469,8 +1531,25 @@ function updateCompassAccuracyBadge(accuracy) {
 // anywhere outside the panel. Triggers carry data-popover-trigger so the
 // document-level close handler can tell "tapped the trigger" (which the
 // trigger's own handler is already toggling) from "tapped away".
+// Declared here, above closeAllPopovers, and NOT down with the rest of the
+// GPS popover code. applyCompassRibbonVisibility() runs synchronously during
+// load and calls closeAllPopovers(), which stops this ticker, so a `let`
+// declared further down the file would still be in its temporal dead zone at
+// that moment: a ReferenceError thrown from load-time code kills every
+// remaining line of app init, silently.
+let gpsPopoverTicker = null;
+function stopGpsPopoverTicker() {
+  if (gpsPopoverTicker === null) return;
+  clearInterval(gpsPopoverTicker);
+  gpsPopoverTicker = null;
+}
+
 function closeAllPopovers() {
   document.querySelectorAll('.popover').forEach((p) => p.classList.add('hidden'));
+  // Single chokepoint: togglePopover, the tap-away handler and the compass
+  // ribbon toggle all route through here, so the ticker cannot outlive a
+  // hidden popover regardless of how it got closed.
+  stopGpsPopoverTicker();
 }
 function togglePopover(id, onOpen) {
   const el = document.getElementById(id);
@@ -1589,22 +1668,56 @@ function renderGpsPopover() {
   // on location (the gap between the ellipsoid and the geoid). Labelling
   // it plainly as GPS elevation rather than implying it's corrected.
   document.getElementById('gps-popover-elevation').textContent =
-    typeof gpsState.altitude === 'number' ? GPS.formatDistance(gpsState.altitude / 1609.344, useMetric) : '\u2014';
+    GPS.formatElevation(gpsState.altitude, useMetric);
   document.getElementById('gps-popover-age').textContent =
     gpsState.at ? `${Math.max(0, Math.round((Date.now() - gpsState.at) / 1000))}s ago` : '\u2014';
 }
 
-document.getElementById('status-chip').onclick = () => togglePopover('popover-gps', renderGpsPopover);
+function isGpsPopoverOpen() {
+  return !document.getElementById('popover-gps').classList.contains('hidden');
+}
 
-function resyncGps() {
+// Re-renders only when the popover is actually on screen. Every field in it
+// was previously frozen at whatever it held when the popover was opened,
+// because renderGpsPopover() ran on open and nowhere else: the position
+// callback repainted the coloured dot but never the panel. Status was the
+// visible symptom (a resync sat on "Resyncing" until the popover was closed
+// and reopened, which made the fixed watch lifecycle look broken) but
+// accuracy, coordinates, elevation and age were equally stale.
+function refreshGpsPopoverIfOpen() {
+  if (isGpsPopoverOpen()) renderGpsPopover();
+}
+
+// Age counts up from the last fix, so it changes with the clock rather than
+// with incoming positions. Rendering it only on new fixes would freeze it
+// exactly when GPS drops out, which is the one moment the number matters.
+// gpsPopoverTicker and stopGpsPopoverTicker live up with closeAllPopovers;
+// see the note there for why they cannot be declared here.
+function startGpsPopoverTicker() {
+  if (gpsPopoverTicker !== null) return;
+  gpsPopoverTicker = setInterval(refreshGpsPopoverIfOpen, 1000);
+}
+
+document.getElementById('status-chip').onclick = () => {
+  togglePopover('popover-gps', renderGpsPopover);
+  // Checked after the toggle, since togglePopover decides which way it went.
+  // A timer left running behind a hidden popover would be a wakeup a second
+  // for nothing, on a device expected to sit in a pocket all day.
+  if (isGpsPopoverOpen()) startGpsPopoverTicker();
+  else stopGpsPopoverTicker();
+};
+
+// The status flip and indicator update stay synchronous so the UI reacts to
+// the tap immediately; only the watch teardown/restart is awaited.
+async function resyncGps() {
   gpsState.status = 'resyncing';
   updateGpsIndicator();
-  GPS.resync();
+  await GPS.resync();
   logInfo('GPS resynced.');
 }
 
-document.getElementById('btn-gps-resync').onclick = () => {
-  resyncGps();
+document.getElementById('btn-gps-resync').onclick = async () => {
+  await resyncGps();
   renderGpsPopover();
 };
 
@@ -1613,6 +1726,7 @@ GPS.startWatching((pos) => {
     gpsState.status = 'error';
     gpsState.error = pos.error;
     updateGpsIndicator();
+    refreshGpsPopoverIfOpen();
     logError(`GPS error: ${pos.error}`);
     return;
   }
@@ -1624,6 +1738,7 @@ GPS.startWatching((pos) => {
   gpsState.altitude = typeof pos.altitude === 'number' ? pos.altitude : null;
   gpsState.at = Date.now();
   updateGpsIndicator();
+  refreshGpsPopoverIfOpen();
 
   if (!sensorMode && typeof pos.heading === 'number' && !isNaN(pos.heading)) {
     setRawHeading(pos.heading); // fallback path also honours north calibration
@@ -1634,11 +1749,11 @@ GPS.startWatching((pos) => {
 
   if (!myMarker) {
     myMarker = L.marker([pos.lat, pos.lng], { icon: headingArrowIcon, rotation: 0, rotateWithView: true }).addTo(map);
-    myMarker.on('click', (ev) => {
+    myMarker.on('click', async (ev) => {
       // In flag/route mode the tap is meant for the map, not for the
       // marker - drop the flag / add the point right where they tapped.
       if (flagModeActive || planningRoute) handleMapTap(ev.latlng);
-      else resyncGps();
+      else await resyncGps();
     });
     applyHeadingToMarker();
     logInfo(`First GPS fix received: ${pos.lat.toFixed(5)}, ${pos.lng.toFixed(5)}`);
@@ -1659,11 +1774,11 @@ GPS.startWatching((pos) => {
   else checkNavSuggestion(pos);
 });
 
-document.getElementById('btn-locate').onclick = () => {
+document.getElementById('btn-locate').onclick = async () => {
   followMe = true;
   if (myMarker) programmaticMove(() => map.panTo(myMarker.getLatLng()));
   else logError('No GPS fix yet - check location permission is granted.');
-  resyncGps(); // recentre and ask the location provider for a fresh fix
+  await resyncGps(); // recentre and ask the location provider for a fresh fix
 };
 // Any user-initiated map gesture stops follow-me, not just a drag.
 // Pinch-zoom and two-finger rotate previously left followMe set, so the
@@ -1990,7 +2105,7 @@ async function openEditFlagDialog(wp, marker) {
   document.getElementById('wp-notes').value = wp.notes || '';
   refreshEditFlagIconPicker();
   await refreshFlagBindSection();
-  openOverlay('dialog-waypoint');
+  openDialog('dialog-waypoint');
 }
 
 // Shared by the manual Bind button and auto-bind-on-drop below - which
@@ -2049,7 +2164,7 @@ async function bindFlagToRoute(candidates, reopenDialogAfterTie = true) {
     // auto-bind-on-drop calls this with reopenDialogAfterTie=false, since
     // forcing the edit dialog open after a plain drop would be a jarring,
     // unrequested side effect.
-    if (reopenDialogAfterTie) openOverlay('dialog-waypoint');
+    if (reopenDialogAfterTie) openDialog('dialog-waypoint');
     if (!pick) return;
     chosen = candidates.find(c => c.route.id === pick.id);
   }
@@ -2108,7 +2223,9 @@ function askRouteChoice(routes) {
       list.appendChild(btn);
     });
     document.getElementById('btn-route-choice-cancel').onclick = () => { closeOverlay('dialog-route-choice'); resolve(null); };
-    openOverlay('dialog-route-choice');
+    openDialog('dialog-route-choice');
+    // Backdrop tap means no route picked, same as Cancel.
+    dialogDismissHandlers.set('dialog-route-choice', () => { closeOverlay('dialog-route-choice'); resolve(null); });
   });
 }
 
@@ -2131,7 +2248,7 @@ document.getElementById('btn-save-waypoint').onclick = async () => {
     && (w.name || '').trim().toLowerCase() === newName.trim().toLowerCase());
   if (clash) {
     await showAlert('Name already used', `Another flag is already called "${newName}". Pick a different name.`);
-    openOverlay('dialog-waypoint'); // showAlert's dialog closed this one
+    openDialog('dialog-waypoint'); // showAlert's dialog closed this one
     return;
   }
   try {
@@ -2219,7 +2336,7 @@ async function redrawAllDataFromStore() {
       // so it has no live handler until the popup actually opens - wired
       // below via the popupopen event on each layer, which is the standard
       // way to attach behavior to interactive popup content in Leaflet.
-      const popupHtml = `<b>${r.name}</b><br>${GPS.formatDistance(dist, useMetric)}<br><button type="button" class="pill-btn route-popup-more">More</button>`;
+      const popupHtml = `<b>${r.name}</b><br>${GPS.formatDistance(dist, useMetric)}<br><button type="button" class="pill-btn route-popup-more">More</button> <button type="button" class="pill-btn pill-btn-danger route-popup-delete">Delete</button>`;
       // A visible thin line plus an invisible wide one underneath sharing
       // the same popup - the thin line matches the line's real weight
       // visually, but taps register over a much wider margin around it
@@ -2227,14 +2344,34 @@ async function redrawAllDataFromStore() {
       // almost exactly, which is what made these hard to tap).
       const hitLine = L.polyline(latlngs, { color: '#000', weight: 22, opacity: 0 }).bindPopup(popupHtml);
       const visibleLine = L.polyline(latlngs, { color: '#ffb703', weight: 3, dashArray: '6,6' }).bindPopup(popupHtml);
-      const wireMoreButton = (layer) => {
+      // Must be attached to BOTH polylines. The popup can be opened from
+      // either the wide invisible hit line or the thin visible one, and each
+      // carries its own popup instance, so wiring only one leaves the buttons
+      // dead depending on exactly where the tap landed.
+      const wireRoutePopupButtons = (layer) => {
         layer.on('popupopen', (e) => {
-          const btn = e.popup.getElement()?.querySelector('.route-popup-more');
-          if (btn) btn.onclick = () => { map.closePopup(); openRouteDetailsSheet(r); };
+          const el = e.popup.getElement();
+          if (!el) return;
+          const moreBtn = el.querySelector('.route-popup-more');
+          if (moreBtn) moreBtn.onclick = () => { map.closePopup(); openRouteDetailsSheet(r); };
+          const delBtn = el.querySelector('.route-popup-delete');
+          if (delBtn) delBtn.onclick = async () => {
+            // Popup closed before the prompt so a Leaflet popup and a modal
+            // dialog are never both on screen competing for the tap.
+            map.closePopup();
+            const ok = await askConfirm('Delete route?', `Delete saved route "${r.name}"?`);
+            if (!ok) return;
+            await unbindFlagsFromRoute(r.id);
+            await Store.deleteRoute(r.id);
+            if (nearbyRouteForSuggestion && nearbyRouteForSuggestion.route.id === r.id) hideNavSuggestion();
+            logInfo(`Route "${r.name}" deleted.`);
+            await redrawAllDataFromStore();
+            renderDataPanel();
+          };
         });
       };
-      wireMoreButton(hitLine);
-      wireMoreButton(visibleLine);
+      wireRoutePopupButtons(hitLine);
+      wireRoutePopupButtons(visibleLine);
       hitLine.addTo(map);
       visibleLine.addTo(map);
       sessionOverlayLines.push(hitLine, visibleLine);
@@ -2356,17 +2493,18 @@ function showAlert(title, message) {
     document.getElementById('confirm-message').textContent = message;
     const yesBtn = document.getElementById('btn-confirm-yes');
     const noBtn = document.getElementById('btn-confirm-no');
-    const prevYesText = yesBtn.textContent;
     yesBtn.textContent = 'OK';
     noBtn.classList.add('hidden');
-    openOverlay('dialog-confirm');
+    openDialog('dialog-confirm');
+    // No restore step: askConfirm() sets both buttons explicitly when it
+    // opens, so it no longer depends on this cleanup putting them back.
     const cleanup = () => {
       yesBtn.onclick = null;
-      yesBtn.textContent = prevYesText;
-      noBtn.classList.remove('hidden');
       closeOverlay('dialog-confirm');
     };
     yesBtn.onclick = () => { cleanup(); resolve(); };
+    // An alert has only one outcome, so a backdrop tap is the same as OK.
+    dialogDismissHandlers.set('dialog-confirm', () => { cleanup(); resolve(); });
   });
 }
 
@@ -2951,7 +3089,7 @@ const RECORD_MAX_SPEED_MPS = 45;     // ~160 km/h; anything faster is a GPS tele
 
 document.getElementById('btn-record').onclick = () => {
   if (recording) stopRecordingFlow();
-  else openOverlay('dialog-start-record');
+  else openDialog('dialog-start-record');
 };
 document.getElementById('btn-start-record-yes').onclick = () => { closeOverlay('dialog-start-record'); startRecording(); };
 document.getElementById('btn-start-record-no').onclick = () => closeOverlay('dialog-start-record');
@@ -3128,6 +3266,14 @@ document.getElementById('btn-start-download').onclick = async () => {
   document.getElementById('download-progress').classList.remove('hidden');
   logInfo(`Download started: "${selectedRegion.label}", layers=${layerIds.join(',')}, zoom ${minZoom}-${maxZoom}`);
 
+  // The progress bar was the only thing reflecting download state; the button
+  // itself still read "Start download" throughout, which looks like the tap
+  // never registered. Disabling it also stops a second tap from starting a
+  // concurrent download over the same region.
+  const startBtn = document.getElementById('btn-start-download');
+  startBtn.textContent = 'Downloading\u2026';
+  startBtn.disabled = true;
+
   try {
     await downloadRegion({
       bbox: selectedRegion.bbox, minZoom, maxZoom, layerIds,
@@ -3145,6 +3291,13 @@ document.getElementById('btn-start-download').onclick = async () => {
     });
   } catch (e) {
     logError(`Download failed: ${e.message}`);
+  } finally {
+    // In finally rather than duplicated across onDone and catch: onDone only
+    // fires on success, so a thrown download would otherwise leave the button
+    // permanently disabled and reading "Downloading", with no way to retry
+    // short of restarting the app.
+    startBtn.textContent = 'Start download';
+    startBtn.disabled = false;
   }
 };
 
@@ -3203,7 +3356,14 @@ async function renderRegionsList(listElId, statsElId) {
         logError(`Failed to delete region tiles: ${e.message}`);
       }
     };
-    li.appendChild(delBtn);
+    // Wrapped the same way as the presets, sessions and routes lists. The
+    // .danger colours live on `.item-actions button.danger`, so a delete
+    // button appended straight onto the li matches no rule at all and renders
+    // as an unstyled default button. This was the actual bug behind 5.5.
+    const actions = document.createElement('span');
+    actions.className = 'item-actions';
+    actions.appendChild(delBtn);
+    li.appendChild(actions);
     listEl.appendChild(li);
   });
 }

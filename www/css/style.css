@@ -804,6 +804,9 @@ input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent);
   padding: 6px 12px; border-radius: 999px; font-size: 12.5px;
 }
 .pill-btn-ghost { background: var(--surface-raised); color: var(--text-muted); border: 1px solid var(--border); }
+/* Small danger variant for popup actions. .btn-danger is the large form used
+   in sheets and dialogs, so it can't be reused at pill size. */
+.pill-btn-danger { background: var(--danger-soft); color: var(--danger); border: 1px solid rgba(230,72,79,0.35); }
 
 /* ===== Debug overlay (created dynamically in JS; styled here for consistency) ===== */
 #debug-overlay { font-family: "SF Mono", "Roboto Mono", monospace; }
