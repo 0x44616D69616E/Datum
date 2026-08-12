@@ -26,6 +26,27 @@ const backdrop = document.getElementById('backdrop');
 // attached to the shared dialog for the next caller to trip over.
 const dialogDismissHandlers = new Map();
 
+// Transient notice for things that happen without the user asking. Deliberately
+// not a dialog: these are informational, and a modal would interrupt whatever
+// the user was doing to report something they did not request.
+let toastTimer = null;
+function showToast(message, ms = 3200) {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = message;
+  el.classList.remove('hidden');
+  // Forces a reflow so the transition runs when a toast replaces one that is
+  // already showing, rather than the class change being coalesced away.
+  void el.offsetWidth;
+  el.classList.add('visible');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    el.classList.remove('visible');
+    // Hidden only after the fade, or the element would vanish mid-transition.
+    toastTimer = setTimeout(() => el.classList.add('hidden'), 200);
+  }, ms);
+}
+
 function anyOverlayVisible() {
   return !!document.querySelector('.sheet:not(.hidden), .dialog:not(.hidden)');
 }
@@ -1218,10 +1239,7 @@ document.getElementById('btn-save-layer-preset').onclick = async () => {
 // whose name already exists is left alone rather than silently overwriting a
 // preset the user has of their own.
 document.getElementById('btn-load-presets-from-folder').onclick = async () => {
-  if (!Storage.isStorageConfigured()) {
-    await showAlert('Storage folder not set', 'Set a storage folder in Settings first, then put shared preset files in its presets folder.');
-    return;
-  }
+  await Storage.ensureStorageRoot();
   let result;
   try {
     result = await Storage.readPresetFiles();
@@ -1250,15 +1268,15 @@ function currentShareOptions() {
   return {
     includeTimestamps: document.getElementById('share-include-timestamps').checked,
     trimEndsMetres: +document.getElementById('share-trim-ends').value || 0,
-    includeDatumExtensions: document.getElementById('share-include-extensions').checked
+    includeDatumExtensions: document.getElementById('share-include-extensions').checked,
+    includeBoundFlags: document.getElementById('share-include-bound-flags').checked
   };
 }
 
 document.getElementById('btn-export-all-share').onclick = async () => {
-  if (!Storage.isStorageConfigured()) {
-    await showAlert('Storage folder not set', 'Set a storage folder in Settings first. That is where shareable files are written.');
-    return;
-  }
+  // No configured-storage precondition any more. ensureStorageRoot() below
+  // creates Documents/Datum on demand, so a first export works without
+  // having visited Settings.
   const opts = currentShareOptions();
   try {
     // The folder can be deleted from a file manager at any time, which leaves
@@ -1300,6 +1318,7 @@ document.getElementById('btn-export-all-share').onclick = async () => {
     if (!opts.includeTimestamps) notes.push('Times were stripped.');
     if (opts.trimEndsMetres) notes.push(`${opts.trimEndsMetres} m trimmed from each end of tracks.`);
     if (!opts.includeDatumExtensions) notes.push('Datum extras left out, so flag icons and route bindings will not survive a re-import.');
+    if (!opts.includeBoundFlags) notes.push('Route files contain only the route line.');
 
     if (!count && (failures.length || skipped)) {
       // Nothing reached disk, so this is a failure and must not be phrased as
@@ -1326,11 +1345,11 @@ document.getElementById('btn-export-all-share').onclick = async () => {
 };
 
 document.getElementById('btn-import-share').onclick = async () => {
-  if (!Storage.isStorageConfigured()) {
-    await showAlert('Storage folder not set', 'Set a storage folder in Settings first, then put GPX files in its flags, routes, tracks or sessions folders.');
-    return;
-  }
   try {
+    // Created rather than refused, so the folders exist for the user to put
+    // files into. Reading an empty folder reports nothing found, which is
+    // more useful than being told to go and configure something first.
+    await Storage.ensureStorageRoot();
     // Collisions are found before anything is written, so cancelling here
     // leaves the database untouched with nothing to roll back.
     const collisions = await Share.findCollisions();
@@ -1378,6 +1397,113 @@ document.getElementById('btn-import-share').onclick = async () => {
     await showAlert('Import failed', e.message);
   }
 };
+
+// ---------- Opening a GPX handed to us by another app ----------
+// Registered as a .gpx handler in the manifest, so tapping a route someone
+// emailed you offers Datum alongside Gaia, OsmAnd and the rest. The file is
+// usually a content:// URI owned by another app's provider rather than
+// anything inside Datum's folders.
+async function handleIncomingGpx(uri, source) {
+  if (!uri) return;
+  // Deliberately NOT filtered by filename. A content:// URI carries no name at
+  // all (content://media/external/downloads/1000000042 is typical), so testing
+  // for ".gpx" here silently discarded exactly the URIs this feature exists to
+  // handle. The manifest filter has already decided the file is ours; the only
+  // thing worth excluding is a web URL, which would arrive from a deep link
+  // rather than a file and is not something to parse as XML.
+  if (/^(https?|about|javascript):/i.test(uri)) return;
+
+  logInfo(`Incoming file (${source}): ${uri}`);
+
+  try {
+    const { parsed, collisions, text, index } = await Share.importExternalGpx(uri);
+    logInfo(`Parsed ${text.length} bytes: ${parsed.waypoints.length} flag(s), ${parsed.routes.length} route(s), ${parsed.tracks.length} track(s).`);
+    const counts = `${parsed.waypoints.length} flag(s), ${parsed.routes.length} route(s), ${parsed.tracks.length} track(s)`;
+
+    let onCollision = 'skip';
+    if (collisions.length) {
+      const sample = collisions.slice(0, 3).map(c => `${c.name} (${c.type.replace(/s$/, '')})`).join(', ');
+      const update = await askConfirm(
+        `${collisions.length} item(s) already exist`,
+        `This file contains ${counts}, and some are already in Datum: ${sample}.\n\n`
+        + 'Update replaces your copies. Anything you have changed locally is overwritten and cannot be recovered.\n\n'
+        + 'Skip keeps your copies and imports only what is new.\n\n'
+        + 'Update these items?');
+      onCollision = update ? 'update' : 'skip';
+    } else {
+      const go = await askConfirm('Open this file?', `This file contains ${counts}. Add them to Datum?`);
+      if (!go) return;
+    }
+
+    const res = await Share.commitExternalGpx(parsed, index, onCollision);
+    await redrawAllDataFromStore();
+    renderDataPanel();
+
+    // Copied into Datum's own folders so the mirror stays complete and the
+    // file does not have to be located again. Best effort: the import has
+    // already succeeded and a failed copy should not present as a failure.
+    let adopted = null;
+    try {
+      await Storage.ensureStorageRoot();
+      const kind = Share.folderForParsed(parsed);
+      // A content:// URI usually ends in an opaque row id, so the last path
+      // segment would save the file as something like "1000000042.gpx".
+      // Falling back to the name of what is actually inside gives a file
+      // someone can recognise later in a file manager.
+      const fromUri = decodeURIComponent((uri.split('/').pop() || '').replace(/\?.*$/, '')).replace(/\.gpx$/i, '');
+      const looksUseful = fromUri && !/^\d+$/.test(fromUri) && !/^[0-9a-f-]{16,}$/i.test(fromUri);
+      const fromContent = (parsed.routes[0] || parsed.tracks[0] || parsed.waypoints[0] || {}).name;
+      const base = looksUseful ? fromUri : (fromContent || 'imported');
+      adopted = await Storage.adoptExternalFile(kind, Storage.safeFilename(base, '.gpx'), text);
+    } catch (e) {
+      logError(`Imported, but could not copy the file into Datum's folder: ${e.message}`);
+    }
+
+    const parts = [`${res.added} new item(s) added.`];
+    if (res.updated) parts.push(`${res.updated} updated.`);
+    if (res.skipped) parts.push(`${res.skipped} already present, left alone.`);
+    if (res.bindingsRestored) parts.push(`${res.bindingsRestored} flag binding(s) reconnected.`);
+    if (res.bindingsDropped) parts.push(`${res.bindingsDropped} flag(s) came in unbound because their route was not in the file.`);
+    if (adopted) parts.push(`Saved a copy as ${adopted}.`);
+    await showAlert('File imported', parts.join(' '));
+    logInfo(`External GPX import from ${uri}: ${res.added} added, ${res.updated} updated, ${res.skipped} skipped.`);
+  } catch (e) {
+    // The URI is logged deliberately. Content URIs vary a lot between file
+    // managers and mail clients, and knowing the exact one that failed is the
+    // only practical way to diagnose a provider Datum cannot read.
+    logError(`Could not open GPX file: ${e.message} (uri: ${uri})`);
+    await showAlert('Could not open file', `${e.message}\n\nIf this keeps happening, try saving the file to your device first and using Import from folder.`);
+  }
+}
+
+// Both entry points are needed and they cover different cases: getLaunchUrl
+// for a cold start where Datum was not running, appUrlOpen for a warm one
+// where it already was. Handling only the listener misses every cold start,
+// which is the common case for tapping a file.
+(async () => {
+  const CapApp = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App;
+  if (!CapApp) {
+    // Not fatal, everything else works, but file-open silently does nothing
+    // without it, so it needs to be visible in the log rather than guessed at.
+    logError('Capacitor App plugin unavailable, so opening .gpx files from other apps will not work.');
+    return;
+  }
+  // Listener registered FIRST. A cold start can deliver the intent before
+  // getLaunchUrl resolves, and registering afterwards would miss it.
+  CapApp.addListener('appUrlOpen', (data) => {
+    handleIncomingGpx(data && data.url, 'appUrlOpen');
+  });
+  try {
+    const launch = await CapApp.getLaunchUrl();
+    // Logged either way. "no launch url" is the normal case for an ordinary
+    // app start, and distinguishing it from "plugin never ran" is the
+    // difference between a working feature and a silent one.
+    if (launch && launch.url) await handleIncomingGpx(launch.url, 'getLaunchUrl');
+    else logInfo('Started without a launch URL (normal app start).');
+  } catch (e) {
+    logError(`Could not read launch URL: ${e.message}`);
+  }
+})();
 
 // ---------- Compass / map rotation ----------
 // The needle SVG is drawn with "N" at 0deg (12 o'clock) by construction.
@@ -2340,10 +2466,6 @@ function drawWaypointMarker(wp) {
 let editingFlag = null;
 let editingFlagIconType = 'flag';
 
-// 30m to offer binding at all; if the two closest routes are within 5m of
-// each other, it's ambiguous enough to ask rather than guess.
-const BIND_PROXIMITY_MILES = 30 / 1609.344;
-const BIND_TIE_MILES = 5 / 1609.344;
 
 async function openEditFlagDialog(wp, marker) {
   editingFlag = { wp, marker };
@@ -2357,12 +2479,62 @@ async function openEditFlagDialog(wp, marker) {
 
 // Shared by the manual Bind button and auto-bind-on-drop below - which
 // routes (if any) is a point close enough to bind to, closest first.
+// Bind hit testing happens in SCREEN space, against what amounts to an
+// invisible thickened copy of each route. This mirrors the 22 px hitLine that
+// already makes routes tappable, so "close enough to bind" and "close enough
+// to tap" are the same target, and both stay constant at every zoom.
+//
+// The previous approach converted a pixel radius into a world distance and
+// then clamped it to sane metres. That clamp is what broke zoomed out: at
+// zoom 8 a 200 m cap works out to 0.4 px, so a flag dropped squarely on the
+// visible line was nowhere near binding. Measuring in pixels removes the
+// conversion, the clamp, and the latitude and rotation corrections along with
+// it, since containerPoint already accounts for all of them.
+//
+// Matching the hitLine weight: half of 22 px is the perpendicular distance
+// from the centreline to the edge of that stroke, so this binds exactly when
+// the tap lands on the drawn hit area.
+const BIND_PROXIMITY_PX = 11;
+// Two routes count as "too close to call" when their pixel distances are
+// within this of each other, rather than a fixed world distance which would
+// mean something different at every zoom.
+const BIND_TIE_PX = 4;
+
+// Perpendicular pixel distance from p to segment ab, all in container points.
+function pointToSegmentPx(p, a, b) {
+  const abx = b.x - a.x, aby = b.y - a.y;
+  const lenSq = abx * abx + aby * aby;
+  // Degenerate segment (both ends on the same pixel) reduces to point distance.
+  if (lenSq === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+  let t = ((p.x - a.x) * abx + (p.y - a.y) * aby) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t));
+}
+
+// Closest approach of a route to a point, in screen pixels.
+function routeDistancePx(point, routePoints) {
+  if (!routePoints || routePoints.length < 2) return Infinity;
+  const p = map.latLngToContainerPoint(point);
+  let best = Infinity;
+  let prev = map.latLngToContainerPoint(routePoints[0]);
+  for (let i = 1; i < routePoints.length; i++) {
+    const cur = map.latLngToContainerPoint(routePoints[i]);
+    const d = pointToSegmentPx(p, prev, cur);
+    if (d < best) best = d;
+    prev = cur;
+  }
+  return best;
+}
+
 async function findBindCandidates(point) {
   const routes = await Store.getRoutes();
   return routes
-    .map(r => ({ route: r, proj: GPS.projectOntoRoute(point, r.points) }))
-    .filter(c => c.proj && c.proj.offRouteMiles <= BIND_PROXIMITY_MILES)
-    .sort((a, b) => a.proj.offRouteMiles - b.proj.offRouteMiles);
+    // The world-space projection is still what gets stored: it supplies the
+    // snapped position and the distance along the route. Only the decision of
+    // whether a route is a candidate at all is made in screen space.
+    .map(r => ({ route: r, proj: GPS.projectOntoRoute(point, r.points), px: routeDistancePx(point, r.points) }))
+    .filter(c => c.proj && c.px <= BIND_PROXIMITY_PX)
+    .sort((a, b) => a.px - b.px);
 }
 
 async function refreshFlagBindSection() {
@@ -2410,7 +2582,7 @@ async function bindFlagToRoute(candidates, reopenDialogAfterTie = true) {
   // Only ambiguous if the two closest are within the tie threshold of
   // each other - otherwise the closest one is an obvious enough choice
   // that asking would just be friction.
-  if (candidates.length > 1 && (candidates[1].proj.offRouteMiles - candidates[0].proj.offRouteMiles) <= BIND_TIE_MILES) {
+  if (candidates.length > 1 && (candidates[1].px - candidates[0].px) <= BIND_TIE_PX) {
     const pick = await askRouteChoice(candidates.map(c => c.route));
     // askRouteChoice opens its own dialog, which (like every overlay)
     // hides whatever else was open. Only reopen the flag dialog if this
@@ -3306,6 +3478,13 @@ async function handleMapTap(latlng) {
         editingFlag = { wp, marker }; // bindFlagToRoute needs this set, same as if the dialog had opened it
         await bindFlagToRoute(candidates, false);
         editingFlag = null;
+        // Auto-bind used to leave no trace outside the debug log, so a flag
+        // could be silently attached to a route, and silently moved onto it,
+        // without the user ever agreeing to either. That surfaces later in
+        // confusing ways, such as a route export carrying flags that look
+        // unrelated. A brief notice is the minimum honest feedback; the flag
+        // dialog is where it can be undone.
+        showToast(`Flag bound to nearby route. Open the flag to unbind.`);
       }
     } catch (err) {
       logError(`Failed to drop flag: ${err.message}`);

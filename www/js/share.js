@@ -51,9 +51,14 @@ export async function exportFlag(wp, options = DEFAULT_SHARE_OPTIONS) {
 // since bindings can only be rebuilt between records in the same file.
 export async function exportRoute(route, options = DEFAULT_SHARE_OPTIONS) {
   const opts = { ...DEFAULT_SHARE_OPTIONS, ...options };
-  const boundFlags = opts.includeBoundFlags === false
+  // route.id is checked explicitly first. A plain equality test would compare
+  // null to null if a route ever arrived without an id, and every unbound flag
+  // in the database has boundRouteId null, so the whole lot would be swept
+  // into the file. Saved routes always get an id, so this cannot happen today,
+  // but the failure mode is silent and the guard costs nothing.
+  const boundFlags = (opts.includeBoundFlags === false || !route.id)
     ? []
-    : (await Store.getWaypoints()).filter(wp => wp.boundRouteId === route.id);
+    : (await Store.getWaypoints()).filter(wp => wp.boundRouteId && wp.boundRouteId === route.id);
   const xml = buildGpx({ name: route.name, routes: [route], waypoints: boundFlags }, opts);
   return Storage.writeShareFile('routes', fileNameFor(route.name, 'route'), xml);
 }
@@ -73,6 +78,85 @@ export async function exportSession(session, options = DEFAULT_SHARE_OPTIONS) {
     tracks: session.tracks || []
   }, options);
   return Storage.writeShareFile('sessions', fileNameFor(session.name, 'session'), xml);
+}
+
+// Imports a GPX file handed to Datum from outside, e.g. by tapping a .gpx
+// attachment or file and choosing Datum. Deliberately reuses the same parse,
+// id-matching and binding-remap path as a folder import, so a file arriving
+// this way is treated no differently from one already in the folders.
+export async function importExternalGpx(uri, onCollision = 'skip') {
+  const text = await Storage.readExternalFile(uri);
+  const parsed = parseGpx(text);
+  if (parsed.errors.length && !parsed.waypoints.length && !parsed.routes.length && !parsed.tracks.length) {
+    throw new Error(parsed.errors[0]);
+  }
+  const index = await buildExistingIndex();
+  // Collisions are computed before writing so the caller can prompt, matching
+  // the folder-import flow. Cancelling then costs nothing.
+  const collisions = [];
+  for (const [type, records] of [['waypoints', parsed.waypoints], ['routes', parsed.routes], ['tracks', parsed.tracks]]) {
+    for (const r of records) {
+      if (r.sourceId && index[type].has(r.sourceId)) collisions.push({ type, name: r.name, id: r.sourceId });
+    }
+  }
+  return { parsed, collisions, text, index };
+}
+
+// Writes an already-parsed external file into the database. Split from the
+// read above so a prompt can sit between them without re-reading the file or
+// rebuilding the index.
+export async function commitExternalGpx(parsed, index, onCollision) {
+  let added = 0, updated = 0, skipped = 0, bindingsRestored = 0, bindingsDropped = 0;
+  const routeIdBySourceId = new Map();
+
+  for (const r of parsed.routes) {
+    const { sourceId, ...record } = r;
+    const existing = sourceId ? index.routes.get(sourceId) : null;
+    if (existing && onCollision === 'skip') { routeIdBySourceId.set(sourceId, existing.id); skipped++; continue; }
+    const saved = await Store.saveRoute({ ...record, id: existing ? existing.id : null });
+    if (sourceId) routeIdBySourceId.set(sourceId, saved.id);
+    if (existing) updated++; else added++;
+  }
+  for (const wp of parsed.waypoints) {
+    const { sourceId, sourceBoundRouteId, ...record } = wp;
+    const existing = sourceId ? index.waypoints.get(sourceId) : null;
+    if (existing && onCollision === 'skip') { skipped++; continue; }
+    const newRouteId = sourceBoundRouteId ? routeIdBySourceId.get(sourceBoundRouteId) : null;
+    if (sourceBoundRouteId) { if (newRouteId) bindingsRestored++; else bindingsDropped++; }
+    await Store.saveWaypoint({
+      ...record,
+      id: existing ? existing.id : null,
+      boundRouteId: newRouteId || null,
+      routeDistance: newRouteId ? record.routeDistance : null
+    });
+    if (existing) updated++; else added++;
+  }
+  for (const t of parsed.tracks) {
+    const { sourceId, ...record } = t;
+    const existing = sourceId ? index.tracks.get(sourceId) : null;
+    if (existing && onCollision === 'skip') { skipped++; continue; }
+    await Store.saveTrack({ ...record, id: existing ? existing.id : null });
+    if (existing) updated++; else added++;
+  }
+  return { added, updated, skipped, bindingsRestored, bindingsDropped };
+}
+
+// Decides which of Datum's folders an adopted file belongs in, based on what
+// it actually contains rather than where it came from.
+export function folderForParsed(parsed) {
+  const hasW = parsed.waypoints.length > 0;
+  const hasR = parsed.routes.length > 0;
+  const hasT = parsed.tracks.length > 0;
+  // A single route plus waypoints is a route export carrying its bound flags,
+  // which is Datum's own default format for sharing a route. Treating it as a
+  // session because it holds two record types filed those under sessions/,
+  // where they read as full snapshots rather than the single route they are.
+  if (hasR && !hasT && parsed.routes.length === 1) return 'routes';
+  if (hasT && !hasR && parsed.tracks.length === 1) return 'tracks';
+  if (hasW && !hasR && !hasT) return 'flags';
+  if (hasR && !hasW && !hasT) return 'routes';
+  if (hasT && !hasW && !hasR) return 'tracks';
+  return 'sessions';
 }
 
 export async function listImportable(kind) {

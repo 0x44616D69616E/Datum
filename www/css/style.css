@@ -815,3 +815,30 @@ input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent);
 
 /* ===== Debug overlay (created dynamically in JS; styled here for consistency) ===== */
 #debug-overlay { font-family: "SF Mono", "Roboto Mono", monospace; }
+
+/* Transient notice for things that happen without the user asking, such as a
+   flag auto-binding to a nearby route. Sits above the map and every sheet, but
+   is not interactive and never blocks a tap, since it appears unprompted and
+   must not interrupt whatever the user was doing. aria-live announces it to a
+   screen reader without moving focus. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 92px;
+  transform: translateX(-50%) translateY(8px);
+  max-width: min(90vw, 420px);
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.35;
+  text-align: center;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+  z-index: 900;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+.toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }

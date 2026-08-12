@@ -174,6 +174,10 @@
         <span>Include times<br><small>A path alone shows where a trail goes. Times also reveal when you were out.</small></span>
       </label>
       <label class="check-row">
+        <input type="checkbox" id="share-include-bound-flags" checked />
+        <span>Include flags bound to a route<br><small>A route file also carries the flags attached to that route, so they stay connected for another Datum user. Note that dropping a flag onto a route binds it automatically, so this can include more than you expect.</small></span>
+      </label>
+      <label class="check-row">
         <input type="checkbox" id="share-include-extensions" checked />
         <span>Include Datum extras<br><small>Flag icons and flag-to-route bindings, so a share into another copy of Datum arrives complete. These sit in GPX's standard extensions element, which other apps ignore. Turn off for the plainest possible file.</small></span>
       </label>
@@ -316,11 +320,11 @@
 </div>
 
 <div id="dialog-onboarding-storage" class="dialog dialog-centered hidden">
-  <h2>Set up storage?</h2>
-  <p class="hint" style="font-size:14.5px; color: var(--text);">Datum can back up your flags, routes, tracks, and settings to a folder on your device, so you can restore them later or move them to a new phone. You can do this later from Settings instead.</p>
+  <h2>Choose a storage folder?</h2>
+  <p class="hint" style="font-size:14.5px; color: var(--text);">Datum saves your flags, routes and tracks as standard GPX files you can open in other apps, back up, or share. These go in <b>Documents/Datum</b> unless you pick somewhere else. You can change this any time in Settings.</p>
   <div class="dialog-actions">
-    <button id="btn-onboarding-storage-later" class="btn-secondary">Later</button>
-    <button id="btn-onboarding-storage-setup" class="btn-primary">Set up now</button>
+    <button id="btn-onboarding-storage-later" class="btn-secondary">Use Documents</button>
+    <button id="btn-onboarding-storage-setup" class="btn-primary">Choose folder</button>
   </div>
 </div>
 
@@ -518,5 +522,7 @@
 <script src="lib/leaflet/leaflet.js"></script>
 <script src="lib/leaflet/leaflet-rotate.js"></script>
 <script type="module" src="js/app.js"></script>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
 </body>
 </html>

@@ -319,6 +319,45 @@ export async function readPresetFiles() {
   return { presets, skipped };
 }
 
+// Configures Documents/Datum if the user has not chosen anywhere themselves.
+//
+// Storage previously stayed unconfigured until someone went through setup, and
+// declining the onboarding prompt left it that way permanently. Every write
+// then returned null and was skipped, so exports and preset files silently did
+// nothing while the app looked like it was working. A sensible default means
+// the feature works out of the box and choosing a folder becomes an
+// adjustment rather than a prerequisite.
+//
+// Called lazily, at the point of the first write, rather than on launch: it
+// requests storage permission, and that prompt belongs to a deliberate user
+// action like exporting rather than appearing unexplained at startup.
+// Reads a file Android handed us from outside the app, via the URI in a VIEW
+// intent. Kept here rather than in share.js because it is a storage concern:
+// the URI is usually a content:// reference owned by another app's provider,
+// not a path inside Datum's own folders.
+export async function readExternalFile(uri) {
+  if (!CapFilesystem) throw new Error('Filesystem access is not available in this environment.');
+  // No `directory` argument. That parameter resolves a path relative to one of
+  // Capacitor's known roots, which is exactly wrong for an absolute URI owned
+  // by someone else; passing it would send the read looking inside Datum's
+  // own storage for a file that is not there.
+  const res = await CapFilesystem.readFile({ path: uri, encoding: 'utf8' });
+  return res.data;
+}
+
+// Copies text into one of Datum's own folders, used after importing a file
+// from outside so the mirror stays complete and the same file does not have to
+// be found again.
+export async function adoptExternalFile(kind, filename, text) {
+  return writeShareFile(kind, filename, text);
+}
+
+export async function ensureStorageConfigured() {
+  if (isStorageConfigured()) return false;
+  await setupStorage('DOCUMENTS', '');
+  return true;
+}
+
 // Recreates the Datum folder and the README if they have gone missing since
 // setup. Deleting the folder from a file manager leaves storageConfigured
 // true, so every subsequent write aimed at a directory that no longer
@@ -327,7 +366,13 @@ export async function readPresetFiles() {
 // Returns true if it had to rebuild, so the caller can say so rather than
 // silently resurrecting a folder the user deliberately removed.
 export async function ensureStorageRoot() {
-  if (!CapFilesystem || !isStorageConfigured()) return false;
+  if (!CapFilesystem) return false;
+  // Falls through to the default location rather than giving up, so a first
+  // export works without the user having visited Settings at all.
+  if (!isStorageConfigured()) {
+    await ensureStorageConfigured();
+    return true;
+  }
   const dir = backupDir(getConfiguredRelativePath());
   try {
     await CapFilesystem.readdir({ path: dir, directory: getConfiguredDirectory() });
