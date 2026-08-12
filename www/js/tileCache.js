@@ -256,6 +256,22 @@ import { LAYER_SOURCES } from './layers.js';
 // Iterates every tile coordinate in range, fetches it, and stores it.
 // Reports progress via the onProgress callback so the UI can show a bar.
 export async function downloadRegion({ bbox, minZoom, maxZoom, layerIds, onProgress, onDone }) {
+  // Each layer's tile cache stops at a different zoom (USGS Topo and BLM at
+  // 16, OpenTopoMap at 17, satellite at 18), so one requested range cannot be
+  // applied uniformly to all of them. Without this, selecting a max zoom above
+  // a layer's ceiling queued tiles that can only ever 404: they were caught
+  // per-tile and logged as "Tile skipped", so the download still reported
+  // success while silently burning time and bandwidth on requests that were
+  // never going to return anything.
+  //
+  // Resolved once per layer rather than per tile, since a region download is
+  // routinely tens of thousands of tiles.
+  const layerCeiling = {};
+  for (const layerId of layerIds) {
+    const source = Object.values(LAYER_SOURCES).find(s => s.id === layerId);
+    layerCeiling[layerId] = source ? (source.maxNativeZoom || source.maxZoom || 19) : 19;
+  }
+
   const tileList = [];
   for (let z = minZoom; z <= maxZoom; z++) {
     const min = latLngToTile(bbox.north, bbox.west, z);
@@ -263,6 +279,7 @@ export async function downloadRegion({ bbox, minZoom, maxZoom, layerIds, onProgr
     for (let x = min.x; x <= max.x; x++) {
       for (let y = min.y; y <= max.y; y++) {
         for (const layerId of layerIds) {
+          if (z > layerCeiling[layerId]) continue;
           tileList.push({ layerId, z, x, y });
         }
       }

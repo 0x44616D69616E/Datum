@@ -107,8 +107,9 @@
 
     <div class="data-section">
       <h3>Layer presets</h3>
-      <p class="hint">Save the current order, visibility, and transparency of every layer as a named preset you can load again later.</p>
+      <p class="hint">Save the current order, visibility, and transparency of every layer as a named preset you can load again later. Saved presets are also written to your storage folder as small shareable files, containing layer settings only, no locations.</p>
       <button id="btn-save-layer-preset" class="btn-primary full-width">Save current layers as preset</button>
+      <button id="btn-load-presets-from-folder" class="btn-secondary full-width">Load presets from folder</button>
       <ul id="saved-layer-presets-list" class="data-list"></ul>
     </div>
   </div>
@@ -163,6 +164,32 @@
       </div>
       <p class="hint">A session is your flags, routes, and tracks. Downloaded map data is always kept separately, no matter what.</p>
       <ul id="saved-sessions-list" class="data-list"></ul>
+    </div>
+
+    <div class="data-section">
+      <h3>Share &amp; import</h3>
+      <p class="hint">Flags, routes, tracks and sessions are saved to your storage folder as GPX, the standard outdoor format. Files work in Garmin, Gaia GPS, CalTopo, OsmAnd and most handheld units, and files from those apps can be imported here. Sharing a route also includes the flags bound to it, so those stay connected when someone else imports it into Datum.</p>
+      <label class="check-row">
+        <input type="checkbox" id="share-include-timestamps" checked />
+        <span>Include times<br><small>A path alone shows where a trail goes. Times also reveal when you were out.</small></span>
+      </label>
+      <label class="check-row">
+        <input type="checkbox" id="share-include-extensions" checked />
+        <span>Include Datum extras<br><small>Flag icons and flag-to-route bindings, so a share into another copy of Datum arrives complete. These sit in GPX's standard extensions element, which other apps ignore. Turn off for the plainest possible file.</small></span>
+      </label>
+      <label>Trim from each end of tracks
+        <select id="share-trim-ends">
+          <option value="0" selected>Don't trim</option>
+          <option value="100">100 m</option>
+          <option value="250">250 m</option>
+          <option value="500">500 m</option>
+        </select>
+      </label>
+      <p class="hint">Tracks often start and stop at home. Trimming keeps the useful middle without publishing where you live.</p>
+      <div class="button-row">
+        <button id="btn-export-all-share" class="btn-primary">Export all to folder</button>
+        <button id="btn-import-share" class="btn-secondary">Import from folder</button>
+      </div>
     </div>
 
     <div class="data-section">
@@ -307,7 +334,7 @@
     <button id="btn-folder-documents" class="btn-secondary full-width">Documents</button>
   </div>
   <div class="dialog-actions">
-    <button id="btn-folder-downloads" class="btn-secondary full-width">Downloads</button>
+    <button id="btn-folder-downloads" class="btn-secondary full-width">Download folder</button>
   </div>
 </div>
 

@@ -1,6 +1,6 @@
 // app.js - main entry point, wires everything together.
 
-import { LAYER_SOURCES, DEFAULT_LAYER_STACK, PRESETS } from './layers.js';
+import { LAYER_SOURCES, DEFAULT_LAYER_STACK, PRESETS, ORDERED_PRESETS } from './layers.js';
 import { createOfflineTileLayer, downloadRegion, deleteTilesInRegion, deleteAllTiles, getTileCacheStats, estimateStorageUsage } from './tileCache.js';
 import { buildBordersLayer } from './boundariesLayer.js';
 import * as Radar from './radarPlayback.js';
@@ -11,6 +11,7 @@ import * as Compass from './compassHeading.js';
 import { logInfo, logError, setDebugEnabled, isDebugEnabled } from './debugOverlay.js';
 import { mountIcons, ICONS, FLAG_TYPES } from './icons.js';
 import * as Storage from './storage.js';
+import * as Share from './share.js';
 
 mountIcons();
 logInfo('app.js loaded and running');
@@ -122,12 +123,13 @@ function refreshStorageUI() {
     return;
   }
   if (Storage.isStorageConfigured()) {
-    const dirLabel = Storage.getConfiguredDirectory() === 'DOCUMENTS' ? 'Documents' : 'Downloads';
-    statusText.textContent = `Storage is set up (${dirLabel}/Datum). Map tiles stay cached separately and aren't part of backups - they can always be re-downloaded.`;
+    // Straight from the stored configuration. Inferring this from the
+    // directory constant alone reported a folder the files were not in.
+    statusText.textContent = `Storage is set up at ${Storage.getConfiguredPathLabel()}. Map tiles stay cached separately and aren't part of backups - they can always be re-downloaded.`;
     backupActions.classList.remove('hidden');
     refreshBackupFilesList();
   } else {
-    statusText.textContent = 'Not set up yet. This creates a Documents/Datum folder for backing up your flags, routes, tracks, and settings.';
+    statusText.textContent = 'Not set up yet. This creates a Datum folder for your backups and for the shareable files Datum writes.';
     backupActions.classList.add('hidden');
   }
 }
@@ -171,7 +173,10 @@ function askStorageFolder() {
     const browseBtn = document.getElementById('btn-folder-browse');
     const cleanup = () => { docsBtn.onclick = null; dlBtn.onclick = null; browseBtn.onclick = null; closeOverlay('dialog-storage-folder'); };
     docsBtn.onclick = () => { cleanup(); resolve({ directory: 'DOCUMENTS', relativePath: '', label: 'Documents/Datum' }); };
-    dlBtn.onclick = () => { cleanup(); resolve({ directory: 'EXTERNAL_STORAGE', relativePath: '', label: 'Downloads/Datum' }); };
+    // relativePath must be 'Download' here. EXTERNAL_STORAGE is the storage
+    // root, so an empty path wrote to /storage/emulated/0/Datum while telling
+    // the user it was in Downloads.
+    dlBtn.onclick = () => { cleanup(); resolve({ directory: 'EXTERNAL_STORAGE', relativePath: Storage.DOWNLOADS_RELATIVE_PATH, label: 'Download/Datum' }); };
     browseBtn.onclick = async () => { cleanup(); resolve(await browseForFolder()); };
     // Backdrop tap leaves the folder unchanged. Callers treat null as "no
     // selection made" already, which is the same outcome as a failed browse.
@@ -1085,10 +1090,31 @@ function applyPreset(preset) {
 
 // Built-in quick presets, shown at the top of the same unified list as
 // the user's own saved presets (not as separate standalone buttons).
+// Replaces the whole stack, order included. Saved presets have always worked
+// this way; this is the same logic lifted out so ordered built-ins can share
+// it rather than being a second implementation that drifts.
+function applyOrderedStack(stack, label) {
+  layerStack = JSON.parse(JSON.stringify(stack)).filter(l => LAYER_SOURCES[l.id]);
+  // Pick up any layer types added since this stack was written, so an older
+  // preset doesn't silently hide brand-new layers forever.
+  DEFAULT_LAYER_STACK.forEach((d) => { if (!layerStack.find(l => l.id === d.id)) layerStack.push({ ...d }); });
+  saveLayerStack();
+  renderLayerManagerUI();
+  applyLayerStack();
+  updateMapOverlays();
+  logInfo(`Layer preset "${label}" loaded.`);
+}
+
+// Two shapes here, deliberately. The first three use PRESETS, an unordered
+// map applied over the user's existing order, which is what they have always
+// done: loading "Satellite only" should not silently rearrange a stack the
+// user has hand-ordered. USGS hybrid is different because its whole point is
+// the ordering, so it carries a full stack instead.
 const BUILT_IN_PRESETS = [
   { name: 'Satellite only', preset: PRESETS.satelliteOnly },
   { name: 'Topo only', preset: PRESETS.topoOnly },
-  { name: 'Hybrid', preset: PRESETS.hybrid }
+  { name: 'Hybrid', preset: PRESETS.hybrid },
+  { name: ORDERED_PRESETS.usgsHybrid.name, orderedStack: ORDERED_PRESETS.usgsHybrid.stack }
 ];
 
 // ---------- User-saved layer presets (full stack: order, visibility, opacity) ----------
@@ -1108,14 +1134,21 @@ function renderLayerPresetsList() {
     if (!listEl) return;
     listEl.innerHTML = '';
 
-    BUILT_IN_PRESETS.forEach(({ name, preset }) => {
+    BUILT_IN_PRESETS.forEach(({ name, preset, orderedStack }) => {
       const li = document.createElement('li');
-      li.innerHTML = `<span>${name}<br><small>Built-in</small></span>`;
+      // Sets layer order is called out because it is the one behavioural
+      // difference between the two kinds, and it is otherwise invisible until
+      // after the stack has already been rearranged.
+      const sub = orderedStack ? 'Built-in, sets layer order' : 'Built-in';
+      li.innerHTML = `<span>${name}<br><small>${sub}</small></span>`;
       const actions = document.createElement('span');
       actions.className = 'item-actions';
       const loadBtn = document.createElement('button');
       loadBtn.textContent = 'Load';
-      loadBtn.onclick = () => applyPreset(preset);
+      loadBtn.onclick = () => {
+        if (orderedStack) applyOrderedStack(orderedStack, name);
+        else applyPreset(preset);
+      };
       actions.appendChild(loadBtn);
       li.appendChild(actions);
       listEl.appendChild(li);
@@ -1129,17 +1162,7 @@ function renderLayerPresetsList() {
       actions.className = 'item-actions';
       const loadBtn = document.createElement('button');
       loadBtn.textContent = 'Load';
-      loadBtn.onclick = () => {
-        layerStack = JSON.parse(JSON.stringify(preset.stack)).filter(l => LAYER_SOURCES[l.id]);
-        // Pick up any layer types added since this preset was saved, so an
-        // older preset doesn't silently hide brand-new layers forever.
-        DEFAULT_LAYER_STACK.forEach((d) => { if (!layerStack.find(l => l.id === d.id)) layerStack.push({ ...d }); });
-        saveLayerStack();
-        renderLayerManagerUI();
-        applyLayerStack();
-        updateMapOverlays();
-        logInfo(`Layer preset "${preset.name}" loaded.`);
-      };
+      loadBtn.onclick = () => applyOrderedStack(preset.stack, preset.name);
       const delBtn = document.createElement('button');
       delBtn.textContent = 'Delete';
       delBtn.className = 'danger';
@@ -1149,6 +1172,13 @@ function renderLayerPresetsList() {
         const updated = getSavedLayerPresets().filter((_, i) => i !== index);
         saveLayerPresetsToStorage(updated);
         renderLayerPresetsList();
+        // The file has to go too. Leaving it behind means the next "load from
+        // folder" would resurrect the preset the user just deleted.
+        try {
+          await Storage.deletePresetFile(preset.name);
+        } catch (e) {
+          logError(`Preset deleted, but removing its file failed: ${e.message}`);
+        }
       };
       actions.appendChild(loadBtn);
       actions.appendChild(delBtn);
@@ -1163,10 +1193,190 @@ document.getElementById('btn-save-layer-preset').onclick = async () => {
   const name = await askName('Save layer preset as', `Preset ${getSavedLayerPresets().length + 1}`);
   if (name === null) return;
   const presets = getSavedLayerPresets();
-  presets.push({ name, stack: JSON.parse(JSON.stringify(layerStack)) });
+  const preset = { name, stack: JSON.parse(JSON.stringify(layerStack)) };
+  presets.push(preset);
   saveLayerPresetsToStorage(presets);
   renderLayerPresetsList();
   logInfo(`Layer preset "${name}" saved.`);
+
+  // localStorage stays the source of truth and is written first. The file is
+  // a mirror that exists so presets can be shared, so a filesystem problem
+  // (storage not configured yet, permission revoked, card removed) must never
+  // cost the user the preset they just saved.
+  try {
+    await Storage.ensureStorageRoot();
+    const filename = await Storage.writePresetFile(preset);
+    if (filename) logInfo(`Preset file written: ${Storage.getConfiguredPathLabel()}/presets/${filename}`);
+    else logInfo('Preset saved. No storage folder is set, so no shareable file was written.');
+  } catch (e) {
+    logError(`Preset saved, but writing its shareable file failed: ${e.message}`);
+  }
+};
+
+// Pulls in preset files that are on disk but not yet known to the app, which
+// is how a preset someone else shared gets in. Matching is by name: a file
+// whose name already exists is left alone rather than silently overwriting a
+// preset the user has of their own.
+document.getElementById('btn-load-presets-from-folder').onclick = async () => {
+  if (!Storage.isStorageConfigured()) {
+    await showAlert('Storage folder not set', 'Set a storage folder in Settings first, then put shared preset files in its presets folder.');
+    return;
+  }
+  let result;
+  try {
+    result = await Storage.readPresetFiles();
+  } catch (e) {
+    logError(`Could not read presets folder: ${e.message}`);
+    return;
+  }
+  const existing = getSavedLayerPresets();
+  const existingNames = new Set(existing.map(p => p.name));
+  const added = result.presets.filter(p => !existingNames.has(p.name));
+  if (added.length) {
+    saveLayerPresetsToStorage(existing.concat(added));
+    renderLayerPresetsList();
+  }
+  const parts = [`${added.length} preset(s) added.`];
+  if (result.presets.length - added.length > 0) parts.push(`${result.presets.length - added.length} already present.`);
+  if (result.skipped.length) parts.push(`${result.skipped.length} file(s) skipped as not readable presets.`);
+  await showAlert('Load presets from folder', parts.join('\n'));
+  logInfo(`Preset import: ${parts.join(' ')}`);
+};
+
+// ---------- Sharing: GPX export/import ----------
+// Reads the privacy controls fresh on each export rather than caching them, so
+// a change in the sheet applies to the very next export with no apply step.
+function currentShareOptions() {
+  return {
+    includeTimestamps: document.getElementById('share-include-timestamps').checked,
+    trimEndsMetres: +document.getElementById('share-trim-ends').value || 0,
+    includeDatumExtensions: document.getElementById('share-include-extensions').checked
+  };
+}
+
+document.getElementById('btn-export-all-share').onclick = async () => {
+  if (!Storage.isStorageConfigured()) {
+    await showAlert('Storage folder not set', 'Set a storage folder in Settings first. That is where shareable files are written.');
+    return;
+  }
+  const opts = currentShareOptions();
+  try {
+    // The folder can be deleted from a file manager at any time, which leaves
+    // the app still configured but pointing at nothing. Rebuilding here means
+    // export recovers by itself instead of writing into a void.
+    if (await Storage.ensureStorageRoot()) {
+      logInfo('Storage folder was missing and has been recreated.');
+    }
+    const [waypoints, routes, tracks, sessions] = await Promise.all([
+      Store.getWaypoints(), Store.getRoutes(), Store.getTracks(), Store.getSessions()
+    ]);
+    let count = 0;
+    let skipped = 0;
+    const failures = [];
+
+    // Each write is caught individually. Previously one try wrapped the whole
+    // loop, so a single failure abandoned every remaining item while the
+    // summary still reported success for a count that had stopped rising.
+    // One unwritable record should not cost the other forty.
+    const write = async (label, fn) => {
+      try {
+        const written = await fn();
+        if (written) count++;
+        // A null return means storage is not configured. That is a skip
+        // rather than a failure, but it must still be visible: it is exactly
+        // the case that produced "exported" with nothing on disk.
+        else skipped++;
+      } catch (e) {
+        failures.push(`${label}: ${e.message}`);
+      }
+    };
+
+    for (const wp of waypoints) await write(wp.name || 'Unnamed flag', () => Share.exportFlag(wp, opts));
+    for (const r of routes) await write(r.name || 'Unnamed route', () => Share.exportRoute(r, opts));
+    for (const t of tracks) await write(t.name || 'Unnamed track', () => Share.exportTrack(t, opts));
+    for (const s of sessions) await write(s.name || 'Unnamed session', () => Share.exportSession(s, opts));
+
+    const notes = [];
+    if (!opts.includeTimestamps) notes.push('Times were stripped.');
+    if (opts.trimEndsMetres) notes.push(`${opts.trimEndsMetres} m trimmed from each end of tracks.`);
+    if (!opts.includeDatumExtensions) notes.push('Datum extras left out, so flag icons and route bindings will not survive a re-import.');
+
+    if (!count && (failures.length || skipped)) {
+      // Nothing reached disk, so this is a failure and must not be phrased as
+      // a success with a footnote.
+      await showAlert('Export failed',
+        `Nothing was written.\n\n${failures.length ? failures.slice(0, 3).join('\n') : 'The storage folder is not available. Open Settings and set it up again.'}`);
+      logError(`GPX export wrote nothing. ${failures.length} failure(s), ${skipped} skipped.`);
+      return;
+    }
+
+    const problems = [];
+    if (failures.length) problems.push(`${failures.length} item(s) could not be written:\n${failures.slice(0, 3).join('\n')}${failures.length > 3 ? `\n...and ${failures.length - 3} more` : ''}`);
+    if (skipped) problems.push(`${skipped} item(s) skipped because the storage folder was unavailable.`);
+
+    await showAlert(failures.length || skipped ? 'Exported with problems' : 'Exported',
+      `${count} file(s) written to ${Storage.getConfiguredPathLabel()}, sorted into flags, routes, tracks and sessions.`
+      + `${notes.length ? '\n\n' + notes.join(' ') : ''}`
+      + `${problems.length ? '\n\n' + problems.join('\n\n') : ''}`);
+    logInfo(`GPX export: ${count} file(s), ${failures.length} failure(s), ${skipped} skipped. ${notes.join(' ')}`);
+  } catch (e) {
+    logError(`Export failed: ${e.message}`);
+    await showAlert('Export failed', e.message);
+  }
+};
+
+document.getElementById('btn-import-share').onclick = async () => {
+  if (!Storage.isStorageConfigured()) {
+    await showAlert('Storage folder not set', 'Set a storage folder in Settings first, then put GPX files in its flags, routes, tracks or sessions folders.');
+    return;
+  }
+  try {
+    // Collisions are found before anything is written, so cancelling here
+    // leaves the database untouched with nothing to roll back.
+    const collisions = await Share.findCollisions();
+    let onCollision = 'skip';
+
+    if (collisions.length) {
+      // Asked once for the whole run, not per record. A folder import can hit
+      // hundreds of collisions and a dialog each time would be unusable.
+      const sample = collisions.slice(0, 3).map(c => `${c.name} (${c.type.replace(/s$/, '')})`).join(', ');
+      const more = collisions.length > 3 ? `, and ${collisions.length - 3} more` : '';
+      const update = await askConfirm(
+        `${collisions.length} item(s) already exist`,
+        `These files contain items already in Datum: ${sample}${more}.\n\n`
+        + 'Update replaces your copies with the versions in the files. Anything you have changed locally is overwritten and cannot be recovered.\n\n'
+        + 'Skip keeps your copies and imports only what is new.\n\n'
+        + 'Update these items?');
+      onCollision = update ? 'update' : 'skip';
+    } else {
+      // No collisions, so there is nothing to ask about, but import still
+      // writes to the database and should not happen on a single stray tap.
+      const go = await askConfirm('Import from folder?',
+        'Every GPX file in your flags, routes, tracks and sessions folders will be read. Nothing you already have will be changed.');
+      if (!go) return;
+    }
+
+    const res = await Share.importAllFrom(undefined, onCollision);
+    await redrawAllDataFromStore();
+    renderDataPanel();
+
+    const parts = [`${res.files} file(s) read.`, `${res.imported} new item(s) added.`];
+    if (res.updated) parts.push(`${res.updated} existing item(s) updated.`);
+    if (res.skipped) parts.push(`${res.skipped} already-present item(s) left alone.`);
+    if (res.bindingsRestored) parts.push(`${res.bindingsRestored} flag binding(s) reconnected to their route.`);
+    // Surfaced rather than swallowed: a flag arriving unbound when the sender
+    // had it bound is a real difference in the data, and silently losing it is
+    // how someone ends up wondering why navigation skips a waypoint.
+    if (res.bindingsDropped) parts.push(`${res.bindingsDropped} flag(s) came in unbound because their route was not in the same file. Import that route alongside them to reconnect.`);
+    // Capped so a folder full of unreadable files cannot produce a dialog
+    // taller than the screen with no way to dismiss it.
+    if (res.errors.length) parts.push(`\nSkipped:\n${res.errors.slice(0, 5).join('\n')}${res.errors.length > 5 ? `\n...and ${res.errors.length - 5} more` : ''}`);
+    await showAlert('Import complete', parts.join(' '));
+    logInfo(`GPX import: ${res.imported} added, ${res.updated} updated, ${res.skipped} skipped, from ${res.files} file(s), ${res.errors.length} problem(s).`);
+  } catch (e) {
+    logError(`Import failed: ${e.message}`);
+    await showAlert('Import failed', e.message);
+  }
 };
 
 // ---------- Compass / map rotation ----------
@@ -1187,6 +1397,43 @@ function updateCompassDisplay() {
   continuousNeedleRotation += delta;
   compassNeedle.style.transform = `rotate(${continuousNeedleRotation}deg)`;
 }
+// Rotating the map exposes map area that was outside the previous
+// axis-aligned tile range (the viewport corners sweep outward), so new tiles
+// are needed. leaflet-rotate does override _getTiledPixelBounds() to compute
+// the rotated range correctly, but it only registers its own rotate handler
+// when `updateWhenIdle` is false, and Leaflet defaults that option to
+// L.Browser.mobile. This app is Android only, so it is always true and the
+// handler was never registered: nothing ever asked for those tiles and the
+// edges stayed blank until a zoom happened to force a refresh.
+//
+// _update() is private API, but it is precisely what leaflet-rotate calls
+// itself via _onMoveEnd. redraw() is the public alternative and is the wrong
+// tool here: it drops every tile and re-adds them, so the map would blank and
+// re-fade on every step of a rotation.
+function refreshLayerTiles(layer) {
+  if (!layer) return;
+  if (typeof layer._update === 'function') {
+    try {
+      layer._update();
+    } catch (e) {
+      // A layer caught mid add/remove can throw here. Skipping it is correct;
+      // it will get its tiles from the normal add path anyway.
+    }
+    return;
+  }
+  // Radar is a group of preloaded frame layers rather than a single grid,
+  // so recurse instead of silently skipping it.
+  if (typeof layer.eachLayer === 'function') layer.eachLayer(refreshLayerTiles);
+}
+// Throttled because heading lock drives setBearing from a requestAnimationFrame
+// loop, so 'rotate' fires at display rate. L.Util.throttle fires on the leading
+// edge and once more on the trailing edge, so the final resting bearing always
+// gets a refresh rather than being left one frame stale. 200ms matches
+// Leaflet's own updateInterval default.
+map.on('rotate', L.Util.throttle(() => {
+  for (const id in activeLeafletLayers) refreshLayerTiles(activeLeafletLayers[id]);
+}, 200, null));
+
 map.on('rotate', updateCompassDisplay);
 updateCompassDisplay();
 
@@ -2128,14 +2375,21 @@ async function refreshFlagBindSection() {
   // Setting display directly rather than toggling a class - guarantees
   // exactly one of these can ever be visible, with no dependency on CSS
   // specificity/cascade order elsewhere in the stylesheet.
-  bindBtn.style.display = 'none';
-  unbindBtn.style.display = 'none';
+  // Toggled by class, not by inline style. Both buttons ship with `hidden` in
+  // the markup, and `.hidden { display: none }`, so the previous
+  // `style.display = ''` never revealed them: clearing an inline declaration
+  // does not set a value, it hands control back to the cascade, where
+  // `.hidden` still won. Both buttons were therefore invisible in every
+  // state, which meant unbinding a flag was impossible and manual binding
+  // had never worked at all.
+  bindBtn.classList.add('hidden');
+  unbindBtn.classList.add('hidden');
 
   if (wp.boundRouteId) {
     const routes = await Store.getRoutes();
     const route = routes.find(r => r.id === wp.boundRouteId);
     statusEl.textContent = route ? `Bound to route "${route.name}".` : 'Bound to a route.';
-    unbindBtn.style.display = '';
+    unbindBtn.classList.remove('hidden');
     return;
   }
 
@@ -2147,7 +2401,7 @@ async function refreshFlagBindSection() {
   statusEl.textContent = candidates.length === 1
     ? `Close to route "${candidates[0].route.name}".`
     : 'Close to more than one route.';
-  bindBtn.style.display = '';
+  bindBtn.classList.remove('hidden');
   bindBtn.onclick = () => bindFlagToRoute(candidates);
 }
 
@@ -2199,7 +2453,11 @@ document.getElementById('btn-unbind-flag').onclick = async () => {
     wp.boundRouteId = null;
     wp.routeDistance = null;
     await Store.saveWaypoint(wp);
-    editingFlag.marker.setIcon(buildFlagDivIcon(editingFlagIconType, false));
+    // wp.iconType, not the module-level editingFlagIconType, for the same
+    // reason spelled out in bindFlagToRoute. Unbind does not commit an
+    // unsaved icon choice, so trusting the picker's live value would leave
+    // the marker showing an icon that does not match what was just persisted.
+    editingFlag.marker.setIcon(buildFlagDivIcon(wp.iconType, false));
     logInfo(`Flag "${wp.name}" unbound from its route.`);
   } catch (e) {
     logError(`Failed to unbind flag: ${e.message}`);
@@ -3231,11 +3489,20 @@ function updateEstimate() {
   const bbox = selectedRegion.bbox;
   const minZ = +document.getElementById('zoom-min').value;
   const maxZ = +document.getElementById('zoom-max').value;
-  let count = 0;
-  for (let z = minZ; z <= maxZ; z++) count += tilesInBboxAtZoom(bbox, z);
-  const layerCount = document.querySelectorAll('#download-layer-checks input:checked').length;
+  // Counted per layer rather than tiles-in-range times layer-count, because
+  // layers stop at different zooms and downloadRegion clamps to each one.
+  // A flat multiply would promise tiles the download correctly declines to
+  // fetch, so the estimate would read high and the progress bar would appear
+  // to finish early.
+  let total = 0;
+  const checked = Array.from(document.querySelectorAll('#download-layer-checks input:checked'));
+  for (const cb of checked) {
+    const source = Object.values(LAYER_SOURCES).find(s => s.id === cb.dataset.dlId);
+    const ceiling = source ? (source.maxNativeZoom || source.maxZoom || 19) : 19;
+    for (let z = minZ; z <= Math.min(maxZ, ceiling); z++) total += tilesInBboxAtZoom(bbox, z);
+  }
   document.getElementById('estimate-readout').textContent =
-    `Estimated tiles: ~${(count * layerCount).toLocaleString()} (roughly ${((count * layerCount * 15) / 1024).toFixed(0)} MB)`;
+    `Estimated tiles: ~${total.toLocaleString()} (roughly ${((total * 15) / 1024).toFixed(0)} MB)`;
 }
 
 function tilesInBboxAtZoom(bbox, z) {

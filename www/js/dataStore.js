@@ -77,6 +77,18 @@ export async function saveSession(name) {
   });
 }
 
+// Stores a session record verbatim. saveSession(name) builds a new snapshot
+// from whatever is currently loaded, which is the wrong operation when
+// restoring one that already exists (it would capture the current map rather
+// than the saved state, and mint a new id). Import needs this instead.
+export async function putSession(session) {
+  return putRecord('sessions', {
+    ...session,
+    id: session.id || uid(),
+    savedAt: session.savedAt || Date.now()
+  });
+}
+
 export async function getSessions() {
   const sessions = await getAll('sessions');
   return sessions.sort((a, b) => b.savedAt - a.savedAt);
@@ -167,25 +179,6 @@ export async function saveTrack({ id, name, points, startedAt, endedAt, createdA
 export async function getTracks() { return getAll('tracks'); }
 export async function deleteTrack(id) { return deleteRecord('tracks', id); }
 
-// --- GPX export (works for routes or tracks) ---
-export function toGPX({ name, points }) {
-  const pointTags = points
-    .map(p => `      <trkpt lat="${p.lat}" lon="${p.lng}">${p.altitude ? `<ele>${p.altitude}</ele>` : ''}</trkpt>`)
-    .join('\n');
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="OfflineTopo">
-  <trk>
-    <name>${escapeXml(name)}</name>
-    <trkseg>
-${pointTags}
-    </trkseg>
-  </trk>
-</gpx>`;
-}
-
-function escapeXml(str) {
-  return String(str).replace(/[<>&'"]/g, (c) => ({
-    '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;'
-  }[c]));
-}
+// GPX generation moved to formats/gpx.js. The version that lived here only
+// ever emitted <trk> with no timestamps, could not represent waypoints or
+// routes, and was never called by anything. Its escapeXml helper went with it.
