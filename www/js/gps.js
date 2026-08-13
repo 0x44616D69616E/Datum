@@ -8,6 +8,15 @@
 // with zero signal" requirement.
 
 let watchId = null;
+// Holds the still-unresolved watchPosition() promise while a registration is
+// in flight. Without this, watchId is null for the whole gap between calling
+// watchPosition and its promise resolving, so a teardown landing inside that
+// window finds nothing to clear and silently leaks the watch that is about
+// to register. stopWatching() awaits this first so it always has the real id.
+let watchPending = null;
+// Tail of the resync queue. See resync() for why overlapping calls have to be
+// serialised rather than just individually awaited.
+let resyncChain = Promise.resolve();
 let onUpdateCallback = null;
 let CapGeo = null;
 
@@ -64,7 +73,12 @@ function startWatchInternal() {
       // Promise from watchPosition depending on how the bridge proxy is
       // set up - only chain .then if we actually got a thenable back.
       if (result && typeof result.then === 'function') {
-        result.then((id) => { watchId = id; }).catch((e) => {
+        watchPending = result;
+        result.then((id) => {
+          watchId = id;
+          watchPending = null;
+        }).catch((e) => {
+          watchPending = null;
           notifyUpdate({ error: `watchPosition setup failed: ${e.message || e}` });
         });
       }
@@ -101,9 +115,41 @@ export function startWatching(onUpdate) {
 // averaging), but it can't do anything about real signal conditions
 // (tree cover, canyon walls, being between buildings) - that's physical,
 // not a state that restarting clears.
+//
+// Must await the teardown before registering the replacement. When these two
+// ran fire-and-forget, the old watch's clearWatch and the new watch's
+// registration were both in flight natively with no defined ordering, so the
+// teardown could land last and kill the watch that had just been created.
+// Nothing then ever delivered a position, and since status only returns to
+// 'locked' on a real position callback, the UI sat on "Resyncing" forever.
+//
+// Serialised through a promise chain because three separate controls call
+// this (the resync button, the locate button, and tapping your own marker),
+// so two resyncs can genuinely overlap. Awaiting inside a single call is not
+// enough on its own: two concurrent calls would each await the same pending
+// registration, then one would clear the watch and the other would find
+// watchId already null, clear nothing, and start a second watch anyway.
+// That strands a live watch with no id anyone holds, which keeps the GPS
+// chip awake and interleaves fixes from two watches into one marker.
 export function resync() {
-  stopWatching();
-  startWatchInternal();
+  resyncChain = resyncChain.then(async () => {
+    await stopWatching();
+    startWatchInternal();
+    // Hold the queue until the new registration resolves, so the next
+    // resync's teardown has a real id to clear rather than racing it.
+    if (watchPending) {
+      try {
+        await watchPending;
+      } catch (e) {
+        // Already surfaced by startWatchInternal's own catch.
+      }
+    }
+  }).catch((e) => {
+    // A rejection here would poison the chain and make every later resync a
+    // no-op, which is the same silent dead-end this fix exists to remove.
+    console.warn('resync failed:', e);
+  });
+  return resyncChain;
 }
 
 function emit(position) {
@@ -119,13 +165,38 @@ function emit(position) {
   });
 }
 
-export function stopWatching() {
-  if (CapGeo && watchId != null) {
-    CapGeo.clearWatch({ id: watchId });
-  } else if (navigator.geolocation && watchId != null) {
-    navigator.geolocation.clearWatch(watchId);
+export async function stopWatching() {
+  // If a registration is still in flight, wait for its id rather than
+  // tearing down nothing and leaving an orphaned watch running.
+  if (watchPending) {
+    try {
+      await watchPending;
+    } catch (e) {
+      // Registration failed, so there is nothing to tear down. The error was
+      // already surfaced by startWatchInternal's own catch.
+    }
   }
+
+  const id = watchId;
+  // Cleared synchronously, before the await below yields, so a watch
+  // registered during the teardown cannot have its id overwritten by this
+  // call, and a second stopWatching cannot try to clear the same id twice.
   watchId = null;
+  if (id == null) return;
+
+  if (CapGeo) {
+    try {
+      await CapGeo.clearWatch({ id });
+    } catch (e) {
+      // Deliberately swallowed rather than routed through notifyUpdate: the
+      // caller is about to start a fresh watch, and flagging GPS as errored
+      // here would show a failure the user is not actually experiencing. A
+      // leaked watch is the lesser problem.
+      console.warn(`clearWatch failed for id ${id}:`, e);
+    }
+  } else if (navigator.geolocation) {
+    navigator.geolocation.clearWatch(id);
+  }
 }
 
 // Haversine distance in miles between two {lat, lng} points - used for
@@ -221,6 +292,23 @@ export function formatDistance(miles, useMetric) {
   const feet = miles * 5280;
   if (feet < 528) return `${Math.round(feet)} ft`;
   return `${miles.toFixed(2)} mi`;
+}
+
+// Vertical elevation is a different display job from horizontal distance,
+// even though both are lengths, so it gets its own formatter rather than
+// reusing formatDistance(). That function's switch to mi/km past a threshold
+// is correct for route segments but wrong here: virtually every real-world
+// elevation clears 528 ft, so it took the miles branch almost every time and
+// rendered a 7,500 ft summit as "1.42 mi". Elevation is conventionally stated
+// in feet or metres at any magnitude, so this never changes unit.
+//
+// Takes raw metres, which is what the GPS reports, instead of routing through
+// miles the way the old call site did. That round trip existed only to satisfy
+// formatDistance's signature and lost precision for nothing.
+export function formatElevation(meters, useMetric) {
+  if (typeof meters !== 'number' || isNaN(meters)) return '\u2014';
+  if (useMetric) return `${Math.round(meters)} m`;
+  return `${Math.round(meters * 3.280839895).toLocaleString()} ft`;
 }
 
 function toRad(deg) {

@@ -34,6 +34,39 @@ function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+// Mirroring the database to GPX files on disk needs to happen on every
+// mutation, and there are eighteen call sites across app.js. Hooking each one
+// individually guarantees that a future nineteenth is missed, so the
+// notification lives here instead, where every write already funnels through.
+//
+// Deliberately fire-and-forget and error-swallowing: the database write is
+// authoritative and must never fail because a file could not be written.
+// A list, not a single slot. Two subscribers already exist (the filesystem
+// mirror and the live-session snapshot), and a single slot would have let
+// whichever registered second silently replace the first.
+const changeListeners = [];
+export function onDataChange(fn) { changeListeners.push(fn); }
+function notify(store, action, record) {
+  for (const fn of changeListeners) {
+    try {
+      const r = fn(store, action, record);
+      if (r && typeof r.catch === 'function') r.catch(() => {});
+    } catch (e) { /* a listener must never break a database write */ }
+  }
+}
+
+// Needed by deletes: the mirror derives a filename from the record, so it has
+// to see the record before it is gone.
+export async function getRecord(store, id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readonly');
+    const req = tx.objectStore(store).get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
 async function putRecord(store, record) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -70,10 +103,36 @@ async function deleteRecord(store, id) {
 // data at all - that lives in a completely separate IndexedDB database
 // (see tileCache.js) specifically so map downloads always persist
 // regardless of what happens to session data.
-export async function saveSession(name) {
+// Accepts an explicit id so the caller can generate a sortable, readable one
+// that doubles as the session's folder name on disk. Falls back to uid() for
+// any caller that does not care.
+export async function saveSession(name, id) {
   const [waypoints, routes, tracks] = await Promise.all([getAll('waypoints'), getAll('routes'), getAll('tracks')]);
   return putRecord('sessions', {
-    id: uid(), name, waypoints, routes, tracks, savedAt: Date.now()
+    id: id || uid(), name, waypoints, routes, tracks, savedAt: Date.now()
+  });
+}
+
+// Re-snapshots an existing session in place, keeping its id and folder. A
+// loaded session is live rather than frozen, so edits made while it is active
+// belong to it; without this they would exist only in the working stores and
+// be lost the moment another session was loaded.
+export async function updateSession(id) {
+  const existing = await getRecord('sessions', id);
+  if (!existing) return null;
+  const [waypoints, routes, tracks] = await Promise.all([getAll('waypoints'), getAll('routes'), getAll('tracks')]);
+  return putRecord('sessions', { ...existing, waypoints, routes, tracks, savedAt: Date.now() });
+}
+
+// Stores a session record verbatim. saveSession(name) builds a new snapshot
+// from whatever is currently loaded, which is the wrong operation when
+// restoring one that already exists (it would capture the current map rather
+// than the saved state, and mint a new id). Import needs this instead.
+export async function putSession(session) {
+  return putRecord('sessions', {
+    ...session,
+    id: session.id || uid(),
+    savedAt: session.savedAt || Date.now()
   });
 }
 
@@ -130,7 +189,7 @@ export async function hasAnyCurrentData() {
 // place (used for renaming and renumbering), or omit `id` to create a new
 // flag with a fresh one.
 export async function saveWaypoint({ id, lat, lng, name, notes, iconType, createdAt, boundRouteId, routeDistance }) {
-  return putRecord('waypoints', {
+  const rec = await putRecord('waypoints', {
     id: id || uid(),
     lat, lng, name, notes,
     iconType: iconType || 'flag', // default for backward compatibility with flags saved before this feature existed
@@ -144,9 +203,17 @@ export async function saveWaypoint({ id, lat, lng, name, notes, iconType, create
     boundRouteId: boundRouteId ?? null,
     routeDistance: typeof routeDistance === 'number' ? routeDistance : null
   });
+  notify('waypoints', 'save', rec);
+  return rec;
 }
 export async function getWaypoints() { return getAll('waypoints'); }
-export async function deleteWaypoint(id) { return deleteRecord('waypoints', id); }
+export async function deleteWaypoint(id) {
+  // Read before delete: the mirror derives its filename from the record,
+  // so waiting until after the row is gone would leave an orphaned file.
+  const rec = await getRecord('waypoints', id);
+  await deleteRecord('waypoints', id);
+  notify('waypoints', 'delete', rec || { id });
+}
 
 // --- Planned routes ---
 // Upsert: pass an existing `id` to update a route in place (used when
@@ -154,38 +221,35 @@ export async function deleteWaypoint(id) { return deleteRecord('waypoints', id);
 // it to create a new one.
 export async function saveRoute({ id, name, points, createdAt }) {
   // points = [{lat, lng}, ...]
-  return putRecord('routes', { id: id || uid(), name, points, createdAt: createdAt || Date.now() });
+  const rec = await putRecord('routes', { id: id || uid(), name, points, createdAt: createdAt || Date.now() });
+  notify('routes', 'save', rec);
+  return rec;
 }
 export async function getRoutes() { return getAll('routes'); }
-export async function deleteRoute(id) { return deleteRecord('routes', id); }
+export async function deleteRoute(id) {
+  // Read before delete: the mirror derives its filename from the record,
+  // so waiting until after the row is gone would leave an orphaned file.
+  const rec = await getRecord('routes', id);
+  await deleteRecord('routes', id);
+  notify('routes', 'delete', rec || { id });
+}
 
 // --- Recorded GPS tracks ---
 export async function saveTrack({ id, name, points, startedAt, endedAt, createdAt }) {
   // points = [{lat, lng, altitude, timestamp}, ...]
-  return putRecord('tracks', { id: id || uid(), name, points, startedAt, endedAt, createdAt: createdAt || Date.now() });
+  const rec = await putRecord('tracks', { id: id || uid(), name, points, startedAt, endedAt, createdAt: createdAt || Date.now() });
+  notify('tracks', 'save', rec);
+  return rec;
 }
 export async function getTracks() { return getAll('tracks'); }
-export async function deleteTrack(id) { return deleteRecord('tracks', id); }
-
-// --- GPX export (works for routes or tracks) ---
-export function toGPX({ name, points }) {
-  const pointTags = points
-    .map(p => `      <trkpt lat="${p.lat}" lon="${p.lng}">${p.altitude ? `<ele>${p.altitude}</ele>` : ''}</trkpt>`)
-    .join('\n');
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="OfflineTopo">
-  <trk>
-    <name>${escapeXml(name)}</name>
-    <trkseg>
-${pointTags}
-    </trkseg>
-  </trk>
-</gpx>`;
+export async function deleteTrack(id) {
+  // Read before delete: the mirror derives its filename from the record,
+  // so waiting until after the row is gone would leave an orphaned file.
+  const rec = await getRecord('tracks', id);
+  await deleteRecord('tracks', id);
+  notify('tracks', 'delete', rec || { id });
 }
 
-function escapeXml(str) {
-  return String(str).replace(/[<>&'"]/g, (c) => ({
-    '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;'
-  }[c]));
-}
+// GPX generation moved to formats/gpx.js. The version that lived here only
+// ever emitted <trk> with no timestamps, could not represent waypoints or
+// routes, and was never called by anything. Its escapeXml helper went with it.

@@ -665,6 +665,11 @@ input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent);
 .hint { font-size: 12.5px; color: var(--text-muted); line-height: 1.4; margin: 8px 0; }
 
 .button-row { display: flex; gap: 10px; margin: 12px 0; }
+/* Checkbox plus wrapped explanatory text. align-items: flex-start keeps the
+   box aligned to the first line rather than centred against a tall block. */
+.check-row { display: flex; align-items: flex-start; gap: 10px; margin: 10px 0; }
+.check-row input { margin-top: 3px; flex: 0 0 auto; }
+.check-row small { color: var(--text-muted); }
 .btn-primary, .btn-secondary, .btn-danger {
   padding: 12px 16px; border-radius: var(--radius-sm); border: none;
   font-size: 14px; font-weight: 600; cursor: pointer; flex: 1;
@@ -804,6 +809,133 @@ input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent);
   padding: 6px 12px; border-radius: 999px; font-size: 12.5px;
 }
 .pill-btn-ghost { background: var(--surface-raised); color: var(--text-muted); border: 1px solid var(--border); }
+/* Small danger variant for popup actions. .btn-danger is the large form used
+   in sheets and dialogs, so it can't be reused at pill size. */
+.pill-btn-danger { background: var(--danger-soft); color: var(--danger); border: 1px solid rgba(230,72,79,0.35); }
 
 /* ===== Debug overlay (created dynamically in JS; styled here for consistency) ===== */
 #debug-overlay { font-family: "SF Mono", "Roboto Mono", monospace; }
+
+/* Transient notice for things that happen without the user asking, such as a
+   flag auto-binding to a nearby route. Sits above the map and every sheet, but
+   is not interactive and never blocks a tap, since it appears unprompted and
+   must not interrupt whatever the user was doing. aria-live announces it to a
+   screen reader without moving focus. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 92px;
+  transform: translateX(-50%) translateY(8px);
+  max-width: min(90vw, 420px);
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.35;
+  text-align: center;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+  z-index: 900;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+.toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* Session tree in the Data sheet. Indentation is the only depth cue, so it is
+   generous enough to read at a glance on a phone. */
+.tree { list-style: none; margin: 8px 0 0; padding: 0; }
+.tree-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 6px; border-bottom: 1px solid var(--border);
+  min-height: 44px; /* comfortable touch target */
+}
+.tree-row.depth-1 { padding-left: 22px; }
+.tree-row.depth-2 { padding-left: 44px; }
+.tree-twisty {
+  flex: 0 0 auto; width: 26px; text-align: center;
+  color: var(--text); font-size: 17px; line-height: 1; user-select: none;
+}
+.tree-twisty.leaf { visibility: hidden; }
+.tree-label { flex: 1 1 auto; min-width: 0; }
+.tree-label .tree-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-label small { color: var(--text-muted); }
+.tree-count { flex: 0 0 auto; color: var(--text-muted); font-size: 12px; }
+.tree-check { flex: 0 0 auto; width: 20px; height: 20px; margin: 0; }
+.tree-empty { color: var(--text-muted); font-size: 13px; padding: 10px 6px; }
+/* The session currently loaded, so the tree shows which one edits belong to. */
+.tree-row.is-active .tree-name { color: var(--accent); font-weight: 600; }
+/* Row action, sized to match the small list buttons rather than the large
+   sheet buttons. Without an explicit rule this renders as an unstyled default
+   button, which is exactly the defect item 5.5 was about. */
+.tree-action {
+  flex: 0 0 auto;
+  padding: 6px 10px; font-size: 12px;
+  border-radius: 8px;
+  background: var(--surface-raised); color: var(--text);
+  border: 1px solid var(--border);
+}
+
+/* Trim controls. The disabled state is greyed rather than hidden so the
+   options stay visible and the checkbox reads as enabling something specific
+   rather than revealing an unknown. */
+.trim-controls { margin: 4px 0 12px; transition: opacity 150ms ease; }
+.trim-controls.is-disabled { opacity: 0.4; pointer-events: none; }
+.slider-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.slider-label { flex: 0 0 96px; font-size: 13px; color: var(--text-muted); }
+.slider-row input[type="range"] { flex: 1 1 auto; min-width: 0; accent-color: var(--accent); }
+.slider-out { flex: 0 0 64px; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; }
+
+/* Folder / file glyph, between the twisty and the label. currentColor picks up
+   the muted text colour so it reads as structure rather than as an action. */
+.tree-icon {
+  flex: 0 0 auto; width: 18px; height: 18px;
+  color: var(--text-muted); display: inline-flex; align-items: center;
+}
+.tree-icon svg { width: 18px; height: 18px; }
+.tree-row.is-active .tree-icon { color: var(--accent); }
+
+/* Floating, draggable, semi-transparent control panel. Sits above the map but
+   is not modal and has no backdrop, because it exists to be used while
+   watching the map underneath it. */
+.float-panel {
+  position: fixed;
+  z-index: 800;
+  width: min(74vw, 290px);
+  padding: 8px 10px 10px;
+  border-radius: 12px;
+  background: rgba(18, 22, 28, 0.78);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.5);
+  color: var(--text);
+  /* Stops a drag from panning the map underneath. Range inputs opt back in
+     below, or they would stop responding to touch entirely. */
+  touch-action: none;
+  user-select: none;
+}
+.float-panel input[type="range"] { touch-action: auto; }
+
+.float-panel-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 8px; margin-bottom: 6px;
+}
+.float-panel-title { font-size: 13px; font-weight: 600; }
+.float-panel-hint { font-size: 10.5px; color: var(--text-muted); }
+
+.slider-row.compact { margin: 6px 0; gap: 8px; }
+.slider-row.compact .slider-label { flex: 0 0 34px; font-size: 12px; }
+.slider-row.compact .slider-out { flex: 0 0 54px; font-size: 12px; }
+
+.float-panel-summary { margin: 6px 0 0; font-size: 11.5px; color: var(--text-muted); line-height: 1.3; }
+.float-panel-warning { margin: 4px 0 0; font-size: 11.5px; color: var(--danger); line-height: 1.3; }
+.float-panel-warning:empty, .float-panel-summary:empty { display: none; }
+
+.float-panel-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 9px; }
+.pill-btn-accent { background: var(--accent); color: #fff; border: 1px solid var(--accent); }
+.float-panel-actions button:disabled { opacity: 0.45; }
+/* Dragging feedback, and it also stops the browser interpreting a long drag as
+   a text selection or context menu. */
+.float-panel.is-dragging { cursor: grabbing; opacity: 0.92; }

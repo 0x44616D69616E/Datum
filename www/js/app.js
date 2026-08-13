@@ -1,6 +1,6 @@
 // app.js - main entry point, wires everything together.
 
-import { LAYER_SOURCES, DEFAULT_LAYER_STACK, PRESETS } from './layers.js';
+import { LAYER_SOURCES, DEFAULT_LAYER_STACK, PRESETS, ORDERED_PRESETS } from './layers.js';
 import { createOfflineTileLayer, downloadRegion, deleteTilesInRegion, deleteAllTiles, getTileCacheStats, estimateStorageUsage } from './tileCache.js';
 import { buildBordersLayer } from './boundariesLayer.js';
 import * as Radar from './radarPlayback.js';
@@ -11,6 +11,8 @@ import * as Compass from './compassHeading.js';
 import { logInfo, logError, setDebugEnabled, isDebugEnabled } from './debugOverlay.js';
 import { mountIcons, ICONS, FLAG_TYPES } from './icons.js';
 import * as Storage from './storage.js';
+import * as Share from './share.js';
+import * as Mirror from './mirror.js';
 
 mountIcons();
 logInfo('app.js loaded and running');
@@ -18,26 +20,167 @@ logInfo('app.js loaded and running');
 // ---------- Overlay system (sheets + dialogs share one backdrop) ----------
 const backdrop = document.getElementById('backdrop');
 
-function openOverlay(id) {
-  document.querySelectorAll('.sheet, .dialog').forEach((el) => el.classList.add('hidden'));
-  document.getElementById(id).classList.remove('hidden');
+// Dialogs that need to settle a pending promise if they are dismissed by a
+// backdrop tap rather than by one of their own buttons. Without this, a
+// backdrop dismiss skips the opener's cleanup(), so the promise never
+// resolves (the await sits there forever) and the button handlers stay
+// attached to the shared dialog for the next caller to trip over.
+const dialogDismissHandlers = new Map();
+
+// Tree selection state. Declared here, above closeOverlay, and NOT down with
+// the rest of the tree code: closeOverlay clears the selection when the Data
+// sheet closes, and a `let` declared further down the file would still be in
+// its temporal dead zone if anything ever called closeOverlay during load. A
+// ReferenceError thrown from load-time code kills every remaining line of app
+// init, silently. Nothing calls it at load today; this makes that not matter.
+//
+// Only LEAF keys are stored. A folder's checkbox state is derived from its
+// leaves, which makes double-counting impossible: ticking a session and then
+// one of its waypoints cannot select the same record twice.
+const treeSelected = new Set();
+let treeSelectMode = false;
+
+// Makes a floating panel draggable by any part of it that is not a control.
+// Pointer events rather than touch or mouse events specifically, so one code
+// path covers finger, stylus and mouse.
+function makeDraggable(panel) {
+  let dragging = false;
+  let originX = 0, originY = 0, startLeft = 0, startTop = 0;
+
+  panel.addEventListener('pointerdown', (e) => {
+    // Controls keep their own behaviour. Without this, starting a drag on the
+    // slider thumb would fight the slider and neither would work properly.
+    if (e.target.closest('input, button, output, select, textarea, a')) return;
+    const rect = panel.getBoundingClientRect();
+    // The panel is first placed with a translateX(-50%) to centre it. Dragging
+    // works in absolute left/top, so the transform is dropped here and the
+    // measured position adopted instead; leaving it would offset every
+    // subsequent position by half the panel width.
+    panel.style.transform = 'none';
+    panel.style.left = `${rect.left}px`;
+    panel.style.top = `${rect.top}px`;
+    dragging = true;
+    originX = e.clientX; originY = e.clientY;
+    startLeft = rect.left; startTop = rect.top;
+    panel.classList.add('is-dragging');
+    // Capture so the drag survives the pointer leaving the panel, which it
+    // will as soon as the panel starts moving out from under the finger.
+    panel.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  panel.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const rect = panel.getBoundingClientRect();
+    // Clamped so the panel can never be dragged fully off screen, which would
+    // leave no way to reach its buttons again.
+    const margin = 24;
+    const maxLeft = window.innerWidth - margin;
+    const maxTop = window.innerHeight - margin;
+    const left = Math.min(maxLeft, Math.max(margin - rect.width, startLeft + (e.clientX - originX)));
+    const top = Math.min(maxTop, Math.max(0, startTop + (e.clientY - originY)));
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+    panel.style.right = 'auto';
+    panel.style.bottom = 'auto';
+  });
+
+  const end = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    panel.classList.remove('is-dragging');
+    try { panel.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
+  };
+  panel.addEventListener('pointerup', end);
+  panel.addEventListener('pointercancel', end);
+}
+
+// Transient notice for things that happen without the user asking. Deliberately
+// not a dialog: these are informational, and a modal would interrupt whatever
+// the user was doing to report something they did not request.
+let toastTimer = null;
+function showToast(message, ms = 3200) {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = message;
+  el.classList.remove('hidden');
+  // Forces a reflow so the transition runs when a toast replaces one that is
+  // already showing, rather than the class change being coalesced away.
+  void el.offsetWidth;
+  el.classList.add('visible');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    el.classList.remove('visible');
+    // Hidden only after the fade, or the element would vanish mid-transition.
+    toastTimer = setTimeout(() => el.classList.add('hidden'), 200);
+  }, ms);
+}
+
+function anyOverlayVisible() {
+  return !!document.querySelector('.sheet:not(.hidden), .dialog:not(.hidden)');
+}
+function showBackdrop() {
   backdrop.classList.remove('hidden');
   requestAnimationFrame(() => backdrop.classList.add('visible'));
 }
+
+// Sheets are mutually exclusive: two stacked bottom sheets is not a state
+// this UI has a way out of, so opening one clears everything else.
+function openOverlay(id) {
+  document.querySelectorAll('.sheet, .dialog').forEach((el) => el.classList.add('hidden'));
+  document.getElementById(id).classList.remove('hidden');
+  showBackdrop();
+}
+
+// Dialogs deliberately do NOT hide sheets. A confirmation raised from inside
+// a sheet used to dismiss that sheet, so confirming a delete dropped you back
+// to the map and the sheet had to be reopened for every single item, and
+// setting the storage folder gave no way to see whether it had taken without
+// reopening Settings. The CSS already stacks these correctly on its own
+// (.sheet is z-index 650, .dialog is 700), so nothing here needs to move; the
+// blanket hide in openOverlay was the only thing in the way.
+//
+// Other dialogs are still cleared, because the dialogs share #dialog-confirm
+// and several flows deliberately chain one dialog into the next.
+function openDialog(id) {
+  document.querySelectorAll('.dialog').forEach((el) => el.classList.add('hidden'));
+  document.getElementById(id).classList.remove('hidden');
+  showBackdrop();
+}
 function closeOverlay(id) {
   document.getElementById(id).classList.add('hidden');
+  dialogDismissHandlers.delete(id);
+  // A selection that survives the sheet closing is how someone deletes
+  // something they ticked ten minutes ago and forgot about.
+  if (id === 'sheet-data' && typeof resetTreeSelection === 'function') resetTreeSelection();
+  // The backdrop is shared, so it can only be torn down once nothing is left
+  // sitting on top of it. Closing a dialog over an open sheet used to strip
+  // the dimming out from under the sheet that was still showing.
+  if (anyOverlayVisible()) return;
   backdrop.classList.remove('visible');
-  setTimeout(() => backdrop.classList.add('hidden'), 200);
+  setTimeout(() => {
+    // Re-checked on the way out: something may have opened during the 200ms
+    // fade, in which case hiding the backdrop now would leave it undimmed.
+    if (!anyOverlayVisible()) backdrop.classList.add('hidden');
+  }, 200);
 }
 function toggleSheet(id) {
   const el = document.getElementById(id);
   if (el.classList.contains('hidden')) openOverlay(id);
   else closeOverlay(id);
 }
+// Dismisses only the topmost layer. Closing everything at once would put the
+// sheet-vanishes-under-you problem straight back via a different gesture:
+// tapping beside a confirmation would take the sheet with it.
 backdrop.onclick = () => {
-  document.querySelectorAll('.sheet, .dialog').forEach((el) => {
-    if (!el.classList.contains('hidden')) closeOverlay(el.id);
-  });
+  const topDialog = document.querySelector('.dialog:not(.hidden)');
+  if (topDialog) {
+    const dismiss = dialogDismissHandlers.get(topDialog.id);
+    if (dismiss) dismiss();
+    else closeOverlay(topDialog.id);
+    return;
+  }
+  document.querySelectorAll('.sheet:not(.hidden)').forEach((el) => closeOverlay(el.id));
 };
 document.querySelectorAll('.sheet-close').forEach((btn) => {
   btn.onclick = () => closeOverlay(btn.dataset.target);
@@ -73,12 +216,13 @@ function refreshStorageUI() {
     return;
   }
   if (Storage.isStorageConfigured()) {
-    const dirLabel = Storage.getConfiguredDirectory() === 'DOCUMENTS' ? 'Documents' : 'Downloads';
-    statusText.textContent = `Storage is set up (${dirLabel}/Datum). Map tiles stay cached separately and aren't part of backups - they can always be re-downloaded.`;
+    // Straight from the stored configuration. Inferring this from the
+    // directory constant alone reported a folder the files were not in.
+    statusText.textContent = `Storage is set up at ${Storage.getConfiguredPathLabel()}. Map tiles stay cached separately and aren't part of backups - they can always be re-downloaded.`;
     backupActions.classList.remove('hidden');
     refreshBackupFilesList();
   } else {
-    statusText.textContent = 'Not set up yet. This creates a Documents/Datum folder for backing up your flags, routes, tracks, and settings.';
+    statusText.textContent = 'Not set up yet. This creates a Datum folder for your backups and for the shareable files Datum writes.';
     backupActions.classList.add('hidden');
   }
 }
@@ -116,14 +260,20 @@ async function refreshBackupFilesList() {
 
 function askStorageFolder() {
   return new Promise((resolve) => {
-    openOverlay('dialog-storage-folder');
+    openDialog('dialog-storage-folder');
     const docsBtn = document.getElementById('btn-folder-documents');
     const dlBtn = document.getElementById('btn-folder-downloads');
     const browseBtn = document.getElementById('btn-folder-browse');
     const cleanup = () => { docsBtn.onclick = null; dlBtn.onclick = null; browseBtn.onclick = null; closeOverlay('dialog-storage-folder'); };
     docsBtn.onclick = () => { cleanup(); resolve({ directory: 'DOCUMENTS', relativePath: '', label: 'Documents/Datum' }); };
-    dlBtn.onclick = () => { cleanup(); resolve({ directory: 'EXTERNAL_STORAGE', relativePath: '', label: 'Downloads/Datum' }); };
+    // relativePath must be 'Download' here. EXTERNAL_STORAGE is the storage
+    // root, so an empty path wrote to /storage/emulated/0/Datum while telling
+    // the user it was in Downloads.
+    dlBtn.onclick = () => { cleanup(); resolve({ directory: 'EXTERNAL_STORAGE', relativePath: Storage.DOWNLOADS_RELATIVE_PATH, label: 'Download/Datum' }); };
     browseBtn.onclick = async () => { cleanup(); resolve(await browseForFolder()); };
+    // Backdrop tap leaves the folder unchanged. Callers treat null as "no
+    // selection made" already, which is the same outcome as a failed browse.
+    dialogDismissHandlers.set('dialog-storage-folder', () => { cleanup(); resolve(null); });
   });
 }
 
@@ -229,12 +379,12 @@ refreshStorageUI();
 // ---------- First-launch onboarding ----------
 if (!localStorage.getItem('onboardingSeen')) {
   localStorage.setItem('onboardingSeen', 'true');
-  openOverlay('dialog-onboarding-offline');
+  openDialog('dialog-onboarding-offline');
 }
 document.getElementById('btn-onboarding-offline-ok').onclick = () => {
   closeOverlay('dialog-onboarding-offline');
   if (!Storage.isStorageConfigured()) {
-    setTimeout(() => openOverlay('dialog-onboarding-storage'), 250);
+    setTimeout(() => openDialog('dialog-onboarding-storage'), 250);
   }
 };
 document.getElementById('btn-onboarding-storage-later').onclick = () => closeOverlay('dialog-onboarding-storage');
@@ -299,12 +449,14 @@ function askName(title, defaultValue) {
     document.getElementById('name-prompt-title').textContent = title;
     const input = document.getElementById('name-prompt-input');
     input.value = defaultValue;
-    openOverlay('dialog-name-prompt');
+    openDialog('dialog-name-prompt');
     const confirmBtn = document.getElementById('btn-name-prompt-confirm');
     const cancelBtn = document.getElementById('btn-name-prompt-cancel');
     const cleanup = () => { confirmBtn.onclick = null; cancelBtn.onclick = null; closeOverlay('dialog-name-prompt'); };
     confirmBtn.onclick = () => { const v = input.value.trim() || defaultValue; cleanup(); resolve(v); };
     cancelBtn.onclick = () => { cleanup(); resolve(null); };
+    // Backdrop tap means Cancel. Callers already branch on null.
+    dialogDismissHandlers.set('dialog-name-prompt', () => { cleanup(); resolve(null); });
   });
 }
 
@@ -312,12 +464,20 @@ function askConfirm(title, message) {
   return new Promise((resolve) => {
     document.getElementById('confirm-title').textContent = title;
     document.getElementById('confirm-message').textContent = message;
-    openOverlay('dialog-confirm');
     const yesBtn = document.getElementById('btn-confirm-yes');
     const noBtn = document.getElementById('btn-confirm-no');
+    // Both buttons are set explicitly rather than assuming whatever the last
+    // caller left behind. #dialog-confirm is shared with showAlert(), which
+    // relabels Yes to OK and hides No; saving and restoring that state across
+    // two callers is fragile, so each opener states in full what it wants.
+    yesBtn.textContent = 'Yes';
+    noBtn.classList.remove('hidden');
+    openDialog('dialog-confirm');
     const cleanup = () => { yesBtn.onclick = null; noBtn.onclick = null; closeOverlay('dialog-confirm'); };
     yesBtn.onclick = () => { cleanup(); resolve(true); };
     noBtn.onclick = () => { cleanup(); resolve(false); };
+    // Tapping the backdrop counts as declining, matching Cancel.
+    dialogDismissHandlers.set('dialog-confirm', () => { cleanup(); resolve(false); });
   });
 }
 
@@ -1023,10 +1183,31 @@ function applyPreset(preset) {
 
 // Built-in quick presets, shown at the top of the same unified list as
 // the user's own saved presets (not as separate standalone buttons).
+// Replaces the whole stack, order included. Saved presets have always worked
+// this way; this is the same logic lifted out so ordered built-ins can share
+// it rather than being a second implementation that drifts.
+function applyOrderedStack(stack, label) {
+  layerStack = JSON.parse(JSON.stringify(stack)).filter(l => LAYER_SOURCES[l.id]);
+  // Pick up any layer types added since this stack was written, so an older
+  // preset doesn't silently hide brand-new layers forever.
+  DEFAULT_LAYER_STACK.forEach((d) => { if (!layerStack.find(l => l.id === d.id)) layerStack.push({ ...d }); });
+  saveLayerStack();
+  renderLayerManagerUI();
+  applyLayerStack();
+  updateMapOverlays();
+  logInfo(`Layer preset "${label}" loaded.`);
+}
+
+// Two shapes here, deliberately. The first three use PRESETS, an unordered
+// map applied over the user's existing order, which is what they have always
+// done: loading "Satellite only" should not silently rearrange a stack the
+// user has hand-ordered. USGS hybrid is different because its whole point is
+// the ordering, so it carries a full stack instead.
 const BUILT_IN_PRESETS = [
   { name: 'Satellite only', preset: PRESETS.satelliteOnly },
   { name: 'Topo only', preset: PRESETS.topoOnly },
-  { name: 'Hybrid', preset: PRESETS.hybrid }
+  { name: 'Hybrid', preset: PRESETS.hybrid },
+  { name: ORDERED_PRESETS.usgsHybrid.name, orderedStack: ORDERED_PRESETS.usgsHybrid.stack }
 ];
 
 // ---------- User-saved layer presets (full stack: order, visibility, opacity) ----------
@@ -1046,14 +1227,21 @@ function renderLayerPresetsList() {
     if (!listEl) return;
     listEl.innerHTML = '';
 
-    BUILT_IN_PRESETS.forEach(({ name, preset }) => {
+    BUILT_IN_PRESETS.forEach(({ name, preset, orderedStack }) => {
       const li = document.createElement('li');
-      li.innerHTML = `<span>${name}<br><small>Built-in</small></span>`;
+      // Sets layer order is called out because it is the one behavioural
+      // difference between the two kinds, and it is otherwise invisible until
+      // after the stack has already been rearranged.
+      const sub = orderedStack ? 'Built-in, sets layer order' : 'Built-in';
+      li.innerHTML = `<span>${name}<br><small>${sub}</small></span>`;
       const actions = document.createElement('span');
       actions.className = 'item-actions';
       const loadBtn = document.createElement('button');
       loadBtn.textContent = 'Load';
-      loadBtn.onclick = () => applyPreset(preset);
+      loadBtn.onclick = () => {
+        if (orderedStack) applyOrderedStack(orderedStack, name);
+        else applyPreset(preset);
+      };
       actions.appendChild(loadBtn);
       li.appendChild(actions);
       listEl.appendChild(li);
@@ -1067,17 +1255,7 @@ function renderLayerPresetsList() {
       actions.className = 'item-actions';
       const loadBtn = document.createElement('button');
       loadBtn.textContent = 'Load';
-      loadBtn.onclick = () => {
-        layerStack = JSON.parse(JSON.stringify(preset.stack)).filter(l => LAYER_SOURCES[l.id]);
-        // Pick up any layer types added since this preset was saved, so an
-        // older preset doesn't silently hide brand-new layers forever.
-        DEFAULT_LAYER_STACK.forEach((d) => { if (!layerStack.find(l => l.id === d.id)) layerStack.push({ ...d }); });
-        saveLayerStack();
-        renderLayerManagerUI();
-        applyLayerStack();
-        updateMapOverlays();
-        logInfo(`Layer preset "${preset.name}" loaded.`);
-      };
+      loadBtn.onclick = () => applyOrderedStack(preset.stack, preset.name);
       const delBtn = document.createElement('button');
       delBtn.textContent = 'Delete';
       delBtn.className = 'danger';
@@ -1087,6 +1265,13 @@ function renderLayerPresetsList() {
         const updated = getSavedLayerPresets().filter((_, i) => i !== index);
         saveLayerPresetsToStorage(updated);
         renderLayerPresetsList();
+        // The file has to go too. Leaving it behind means the next "load from
+        // folder" would resurrect the preset the user just deleted.
+        try {
+          await Storage.deletePresetFile(preset.name);
+        } catch (e) {
+          logError(`Preset deleted, but removing its file failed: ${e.message}`);
+        }
       };
       actions.appendChild(loadBtn);
       actions.appendChild(delBtn);
@@ -1101,11 +1286,335 @@ document.getElementById('btn-save-layer-preset').onclick = async () => {
   const name = await askName('Save layer preset as', `Preset ${getSavedLayerPresets().length + 1}`);
   if (name === null) return;
   const presets = getSavedLayerPresets();
-  presets.push({ name, stack: JSON.parse(JSON.stringify(layerStack)) });
+  const preset = { name, stack: JSON.parse(JSON.stringify(layerStack)) };
+  presets.push(preset);
   saveLayerPresetsToStorage(presets);
   renderLayerPresetsList();
   logInfo(`Layer preset "${name}" saved.`);
+
+  // localStorage stays the source of truth and is written first. The file is
+  // a mirror that exists so presets can be shared, so a filesystem problem
+  // (storage not configured yet, permission revoked, card removed) must never
+  // cost the user the preset they just saved.
+  try {
+    await Storage.ensureStorageRoot();
+    const filename = await Storage.writePresetFile(preset);
+    if (filename) logInfo(`Preset file written: ${Storage.getConfiguredPathLabel()}/presets/${filename}`);
+    else logInfo('Preset saved. No storage folder is set, so no shareable file was written.');
+  } catch (e) {
+    logError(`Preset saved, but writing its shareable file failed: ${e.message}`);
+  }
 };
+
+// Pulls in preset files that are on disk but not yet known to the app, which
+// is how a preset someone else shared gets in. Matching is by name: a file
+// whose name already exists is left alone rather than silently overwriting a
+// preset the user has of their own.
+document.getElementById('btn-load-presets-from-folder').onclick = async () => {
+  await Storage.ensureStorageRoot();
+  let result;
+  try {
+    result = await Storage.readPresetFiles();
+  } catch (e) {
+    logError(`Could not read presets folder: ${e.message}`);
+    return;
+  }
+  const existing = getSavedLayerPresets();
+  const existingNames = new Set(existing.map(p => p.name));
+  const added = result.presets.filter(p => !existingNames.has(p.name));
+  if (added.length) {
+    saveLayerPresetsToStorage(existing.concat(added));
+    renderLayerPresetsList();
+  }
+  const parts = [`${added.length} preset(s) added.`];
+  if (result.presets.length - added.length > 0) parts.push(`${result.presets.length - added.length} already present.`);
+  if (result.skipped.length) parts.push(`${result.skipped.length} file(s) skipped as not readable presets.`);
+  await showAlert('Load presets from folder', parts.join('\n'));
+  logInfo(`Preset import: ${parts.join(' ')}`);
+};
+
+// ---------- Filesystem mirror ----------
+Mirror.startMirroring();
+
+// A loaded session is live, not frozen: edits made while it is active belong
+// to it. Re-snapshotting on every single change would rewrite every record's
+// copy on each keystroke, so it is debounced and coalesced. The delay is short
+// enough that closing the app shortly after an edit still captures it.
+let sessionSyncTimer = null;
+Store.onDataChange(() => {
+  if (!currentSessionId) return;
+  if (sessionSyncTimer) clearTimeout(sessionSyncTimer);
+  sessionSyncTimer = setTimeout(async () => {
+    sessionSyncTimer = null;
+    try {
+      await Store.updateSession(currentSessionId);
+    } catch (e) {
+      logError(`Could not update session snapshot: ${e.message}`);
+    }
+  }, 1500);
+});
+
+// ---------- Sharing: GPX export/import ----------
+// Reads the privacy controls fresh on each export rather than caching them, so
+// a change in the sheet applies to the very next export with no apply step.
+// Sliders work in whole metres internally and display in the user's chosen
+// units, so the stored value never drifts through a rounding trip and the
+// label always matches the rest of the app.
+const TRIM_MAX_METRES = 1000;
+
+function trimLabel(metres) {
+  if (useMetric) return `${metres} m`;
+  return `${Math.round(metres * 3.280839895)} ft`;
+}
+
+function syncTrimUI() {
+  const on = document.getElementById('share-trim-enabled').checked;
+  const box = document.getElementById('share-trim-controls');
+  box.classList.toggle('is-disabled', !on);
+  for (const which of ['start', 'end']) {
+    const slider = document.getElementById(`share-trim-${which}`);
+    slider.disabled = !on;
+    document.getElementById(`share-trim-${which}-out`).textContent = trimLabel(+slider.value);
+  }
+}
+
+document.getElementById('share-trim-enabled').onchange = syncTrimUI;
+for (const which of ['start', 'end']) {
+  document.getElementById(`share-trim-${which}`).addEventListener('input', syncTrimUI);
+}
+syncTrimUI();
+
+// Read fresh on each use rather than cached, so a change applies to the very
+// next action with no apply step.
+function currentShareOptions() {
+  const trimOn = document.getElementById('share-trim-enabled').checked;
+  return {
+    includeTimestamps: document.getElementById('share-include-timestamps').checked,
+    trimStartMetres: trimOn ? +document.getElementById('share-trim-start').value || 0 : 0,
+    trimEndMetres: trimOn ? +document.getElementById('share-trim-end').value || 0 : 0
+  };
+}
+
+document.getElementById('btn-package-session').onclick = async () => {
+  if (!currentSessionId) {
+    await showAlert('Save the session first',
+      'Packaging writes one file containing a whole session, so the session needs a name and a folder to live in. Use "Save session" first.');
+    return;
+  }
+  try {
+    await Storage.ensureStorageRoot();
+    // The mirror writes per record as you go, so a queued write could still be
+    // in flight. Flushing first means the package cannot miss a record that
+    // was added a moment ago.
+    await Mirror.flushMirror();
+    const sessions = await Store.getSessions();
+    const session = sessions.find(x => x.id === currentSessionId);
+    if (!session) { await showAlert('Session not found', 'Could not find the saved session to package.'); return; }
+
+    const opts = currentShareOptions();
+    const filename = await Share.exportSessionPackage(session, opts);
+    const notes = [];
+    if (!opts.includeTimestamps) notes.push('Times were stripped.');
+    if (opts.trimStartMetres) notes.push(`${trimLabel(opts.trimStartMetres)} trimmed from the start of tracks.`);
+    if (opts.trimEndMetres) notes.push(`${trimLabel(opts.trimEndMetres)} trimmed from the end of tracks.`);
+    await showAlert('Session packaged',
+      `Written to ${Storage.getConfiguredPathLabel()}/sessions/${currentSessionId}/${filename}.${notes.length ? '\n\n' + notes.join(' ') : ''}`);
+    logInfo(`Session packaged: ${filename}`);
+  } catch (e) {
+    logError(`Packaging failed: ${e.message}`);
+    await showAlert('Packaging failed', e.message);
+  }
+};
+
+// The earlier flat layout wrote records into Datum/flags, Datum/routes and
+// Datum/tracks, and dropped packaged exports loose in sessions/. Nothing
+// writes there any more, but the files are real data and are not deleted
+// without asking.
+document.getElementById('btn-tidy-storage').onclick = async () => {
+  try {
+    await Storage.ensureStorageRoot();
+    const found = await Storage.findLegacyLeftovers();
+    if (!found.total) {
+      await showAlert('Nothing to tidy', 'Your storage folder is already using the current layout.');
+      return;
+    }
+    const bits = found.folders.map(f => `${f.name}/ (${f.count} file(s))`);
+    if (found.looseSessionFiles.length) bits.push(`${found.looseSessionFiles.length} loose file(s) in sessions/`);
+    const ok = await askConfirm('Tidy up old folders?',
+      `These are left over from an earlier layout and nothing writes to them now:\n\n${bits.join('\n')}\n\n`
+      + 'Your waypoints, routes and tracks already live in current/ and your session folders, so these are duplicates. Delete them?');
+    if (!ok) return;
+    const removed = await Storage.removeLegacyLeftovers();
+    await showAlert('Tidied up', `${removed} file(s) removed.`);
+    logInfo(`Storage tidy: ${removed} legacy file(s) removed.`);
+  } catch (e) {
+    logError(`Tidy failed: ${e.message}`);
+    await showAlert('Tidy failed', e.message);
+  }
+};
+
+document.getElementById('btn-import-share').onclick = async () => {
+  try {
+    // Created rather than refused, so the folders exist for the user to put
+    // files into. Reading an empty folder reports nothing found, which is
+    // more useful than being told to go and configure something first.
+    await Storage.ensureStorageRoot();
+    // Collisions are found before anything is written, so cancelling here
+    // leaves the database untouched with nothing to roll back.
+    const collisions = await Share.findCollisions();
+    let onCollision = 'skip';
+
+    if (collisions.length) {
+      // Asked once for the whole run, not per record. A folder import can hit
+      // hundreds of collisions and a dialog each time would be unusable.
+      const sample = collisions.slice(0, 3).map(c => `${c.name} (${c.type.replace(/s$/, '')})`).join(', ');
+      const more = collisions.length > 3 ? `, and ${collisions.length - 3} more` : '';
+      const update = await askConfirm(
+        `${collisions.length} item(s) already exist`,
+        `These files contain items already in Datum: ${sample}${more}.\n\n`
+        + 'Update replaces your copies with the versions in the files. Anything you have changed locally is overwritten and cannot be recovered.\n\n'
+        + 'Skip keeps your copies and imports only what is new.\n\n'
+        + 'Update these items?');
+      onCollision = update ? 'update' : 'skip';
+    } else {
+      // No collisions, so there is nothing to ask about, but import still
+      // writes to the database and should not happen on a single stray tap.
+      const go = await askConfirm('Import from folder?',
+        'Every GPX file in current/ and your session folders will be read. Files Datum wrote itself are recognised and skipped, so nothing is duplicated and nothing you already have is changed.');
+      if (!go) return;
+    }
+
+    const res = await Share.importAllFrom(undefined, onCollision);
+    await redrawAllDataFromStore();
+    renderDataPanel();
+
+    const parts = [`${res.files} file(s) read.`, `${res.imported} new item(s) added.`];
+    if (res.updated) parts.push(`${res.updated} existing item(s) updated.`);
+    if (res.skipped) parts.push(`${res.skipped} already-present item(s) left alone.`);
+    if (res.bindingsRestored) parts.push(`${res.bindingsRestored} flag binding(s) reconnected to their route.`);
+    // Surfaced rather than swallowed: a flag arriving unbound when the sender
+    // had it bound is a real difference in the data, and silently losing it is
+    // how someone ends up wondering why navigation skips a waypoint.
+    if (res.bindingsDropped) parts.push(`${res.bindingsDropped} flag(s) came in unbound because their route was not in the same file. Import that route alongside them to reconnect.`);
+    // Capped so a folder full of unreadable files cannot produce a dialog
+    // taller than the screen with no way to dismiss it.
+    if (res.errors.length) parts.push(`\nSkipped:\n${res.errors.slice(0, 5).join('\n')}${res.errors.length > 5 ? `\n...and ${res.errors.length - 5} more` : ''}`);
+    await showAlert('Import complete', parts.join(' '));
+    logInfo(`GPX import: ${res.imported} added, ${res.updated} updated, ${res.skipped} skipped, from ${res.files} file(s), ${res.errors.length} problem(s).`);
+  } catch (e) {
+    logError(`Import failed: ${e.message}`);
+    await showAlert('Import failed', e.message);
+  }
+};
+
+// ---------- Opening a GPX handed to us by another app ----------
+// Registered as a .gpx handler in the manifest, so tapping a route someone
+// emailed you offers Datum alongside Gaia, OsmAnd and the rest. The file is
+// usually a content:// URI owned by another app's provider rather than
+// anything inside Datum's folders.
+async function handleIncomingGpx(uri, source) {
+  if (!uri) return;
+  // Deliberately NOT filtered by filename. A content:// URI carries no name at
+  // all (content://media/external/downloads/1000000042 is typical), so testing
+  // for ".gpx" here silently discarded exactly the URIs this feature exists to
+  // handle. The manifest filter has already decided the file is ours; the only
+  // thing worth excluding is a web URL, which would arrive from a deep link
+  // rather than a file and is not something to parse as XML.
+  if (/^(https?|about|javascript):/i.test(uri)) return;
+
+  logInfo(`Incoming file (${source}): ${uri}`);
+
+  try {
+    const { parsed, collisions, text, index } = await Share.importExternalGpx(uri);
+    logInfo(`Parsed ${text.length} bytes: ${parsed.waypoints.length} flag(s), ${parsed.routes.length} route(s), ${parsed.tracks.length} track(s).`);
+    const counts = `${parsed.waypoints.length} flag(s), ${parsed.routes.length} route(s), ${parsed.tracks.length} track(s)`;
+
+    let onCollision = 'skip';
+    if (collisions.length) {
+      const sample = collisions.slice(0, 3).map(c => `${c.name} (${c.type.replace(/s$/, '')})`).join(', ');
+      const update = await askConfirm(
+        `${collisions.length} item(s) already exist`,
+        `This file contains ${counts}, and some are already in Datum: ${sample}.\n\n`
+        + 'Update replaces your copies. Anything you have changed locally is overwritten and cannot be recovered.\n\n'
+        + 'Skip keeps your copies and imports only what is new.\n\n'
+        + 'Update these items?');
+      onCollision = update ? 'update' : 'skip';
+    } else {
+      const go = await askConfirm('Open this file?', `This file contains ${counts}. Add them to Datum?`);
+      if (!go) return;
+    }
+
+    const res = await Share.commitExternalGpx(parsed, index, onCollision);
+    await redrawAllDataFromStore();
+    renderDataPanel();
+
+    // Copied into Datum's own folders so the mirror stays complete and the
+    // file does not have to be located again. Best effort: the import has
+    // already succeeded and a failed copy should not present as a failure.
+    let adopted = null;
+    try {
+      await Storage.ensureStorageRoot();
+      // Adopted into the live session, since an incoming file is something you
+      // are adding to what you are working on now.
+      const folder = Share.folderForParsed(parsed);
+      // A content:// URI usually ends in an opaque row id, so the last path
+      // segment would save the file as something like "1000000042.gpx".
+      // Falling back to the name of what is actually inside gives a file
+      // someone can recognise later in a file manager.
+      const fromUri = decodeURIComponent((uri.split('/').pop() || '').replace(/\?.*$/, '')).replace(/\.gpx$/i, '');
+      const looksUseful = fromUri && !/^\d+$/.test(fromUri) && !/^[0-9a-f-]{16,}$/i.test(fromUri);
+      const fromContent = (parsed.routes[0] || parsed.tracks[0] || parsed.waypoints[0] || {}).name;
+      const base = looksUseful ? fromUri : (fromContent || 'imported');
+      adopted = await Storage.writeRecordFile(Storage.currentDir(), folder, Storage.safeFilename(base, '.gpx'), text);
+    } catch (e) {
+      logError(`Imported, but could not copy the file into Datum's folder: ${e.message}`);
+    }
+
+    const parts = [`${res.added} new item(s) added.`];
+    if (res.updated) parts.push(`${res.updated} updated.`);
+    if (res.skipped) parts.push(`${res.skipped} already present, left alone.`);
+    if (res.bindingsRestored) parts.push(`${res.bindingsRestored} flag binding(s) reconnected.`);
+    if (res.bindingsDropped) parts.push(`${res.bindingsDropped} flag(s) came in unbound because their route was not in the file.`);
+    if (adopted) parts.push(`Saved a copy as ${adopted}.`);
+    await showAlert('File imported', parts.join(' '));
+    logInfo(`External GPX import from ${uri}: ${res.added} added, ${res.updated} updated, ${res.skipped} skipped.`);
+  } catch (e) {
+    // The URI is logged deliberately. Content URIs vary a lot between file
+    // managers and mail clients, and knowing the exact one that failed is the
+    // only practical way to diagnose a provider Datum cannot read.
+    logError(`Could not open GPX file: ${e.message} (uri: ${uri})`);
+    await showAlert('Could not open file', `${e.message}\n\nIf this keeps happening, try saving the file to your device first and using Import from folder.`);
+  }
+}
+
+// Both entry points are needed and they cover different cases: getLaunchUrl
+// for a cold start where Datum was not running, appUrlOpen for a warm one
+// where it already was. Handling only the listener misses every cold start,
+// which is the common case for tapping a file.
+(async () => {
+  const CapApp = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App;
+  if (!CapApp) {
+    // Not fatal, everything else works, but file-open silently does nothing
+    // without it, so it needs to be visible in the log rather than guessed at.
+    logError('Capacitor App plugin unavailable, so opening .gpx files from other apps will not work.');
+    return;
+  }
+  // Listener registered FIRST. A cold start can deliver the intent before
+  // getLaunchUrl resolves, and registering afterwards would miss it.
+  CapApp.addListener('appUrlOpen', (data) => {
+    handleIncomingGpx(data && data.url, 'appUrlOpen');
+  });
+  try {
+    const launch = await CapApp.getLaunchUrl();
+    // Logged either way. "no launch url" is the normal case for an ordinary
+    // app start, and distinguishing it from "plugin never ran" is the
+    // difference between a working feature and a silent one.
+    if (launch && launch.url) await handleIncomingGpx(launch.url, 'getLaunchUrl');
+    else logInfo('Started without a launch URL (normal app start).');
+  } catch (e) {
+    logError(`Could not read launch URL: ${e.message}`);
+  }
+})();
 
 // ---------- Compass / map rotation ----------
 // The needle SVG is drawn with "N" at 0deg (12 o'clock) by construction.
@@ -1125,6 +1634,43 @@ function updateCompassDisplay() {
   continuousNeedleRotation += delta;
   compassNeedle.style.transform = `rotate(${continuousNeedleRotation}deg)`;
 }
+// Rotating the map exposes map area that was outside the previous
+// axis-aligned tile range (the viewport corners sweep outward), so new tiles
+// are needed. leaflet-rotate does override _getTiledPixelBounds() to compute
+// the rotated range correctly, but it only registers its own rotate handler
+// when `updateWhenIdle` is false, and Leaflet defaults that option to
+// L.Browser.mobile. This app is Android only, so it is always true and the
+// handler was never registered: nothing ever asked for those tiles and the
+// edges stayed blank until a zoom happened to force a refresh.
+//
+// _update() is private API, but it is precisely what leaflet-rotate calls
+// itself via _onMoveEnd. redraw() is the public alternative and is the wrong
+// tool here: it drops every tile and re-adds them, so the map would blank and
+// re-fade on every step of a rotation.
+function refreshLayerTiles(layer) {
+  if (!layer) return;
+  if (typeof layer._update === 'function') {
+    try {
+      layer._update();
+    } catch (e) {
+      // A layer caught mid add/remove can throw here. Skipping it is correct;
+      // it will get its tiles from the normal add path anyway.
+    }
+    return;
+  }
+  // Radar is a group of preloaded frame layers rather than a single grid,
+  // so recurse instead of silently skipping it.
+  if (typeof layer.eachLayer === 'function') layer.eachLayer(refreshLayerTiles);
+}
+// Throttled because heading lock drives setBearing from a requestAnimationFrame
+// loop, so 'rotate' fires at display rate. L.Util.throttle fires on the leading
+// edge and once more on the trailing edge, so the final resting bearing always
+// gets a refresh rather than being left one frame stale. 200ms matches
+// Leaflet's own updateInterval default.
+map.on('rotate', L.Util.throttle(() => {
+  for (const id in activeLeafletLayers) refreshLayerTiles(activeLeafletLayers[id]);
+}, 200, null));
+
 map.on('rotate', updateCompassDisplay);
 updateCompassDisplay();
 
@@ -1469,8 +2015,25 @@ function updateCompassAccuracyBadge(accuracy) {
 // anywhere outside the panel. Triggers carry data-popover-trigger so the
 // document-level close handler can tell "tapped the trigger" (which the
 // trigger's own handler is already toggling) from "tapped away".
+// Declared here, above closeAllPopovers, and NOT down with the rest of the
+// GPS popover code. applyCompassRibbonVisibility() runs synchronously during
+// load and calls closeAllPopovers(), which stops this ticker, so a `let`
+// declared further down the file would still be in its temporal dead zone at
+// that moment: a ReferenceError thrown from load-time code kills every
+// remaining line of app init, silently.
+let gpsPopoverTicker = null;
+function stopGpsPopoverTicker() {
+  if (gpsPopoverTicker === null) return;
+  clearInterval(gpsPopoverTicker);
+  gpsPopoverTicker = null;
+}
+
 function closeAllPopovers() {
   document.querySelectorAll('.popover').forEach((p) => p.classList.add('hidden'));
+  // Single chokepoint: togglePopover, the tap-away handler and the compass
+  // ribbon toggle all route through here, so the ticker cannot outlive a
+  // hidden popover regardless of how it got closed.
+  stopGpsPopoverTicker();
 }
 function togglePopover(id, onOpen) {
   const el = document.getElementById(id);
@@ -1589,22 +2152,56 @@ function renderGpsPopover() {
   // on location (the gap between the ellipsoid and the geoid). Labelling
   // it plainly as GPS elevation rather than implying it's corrected.
   document.getElementById('gps-popover-elevation').textContent =
-    typeof gpsState.altitude === 'number' ? GPS.formatDistance(gpsState.altitude / 1609.344, useMetric) : '\u2014';
+    GPS.formatElevation(gpsState.altitude, useMetric);
   document.getElementById('gps-popover-age').textContent =
     gpsState.at ? `${Math.max(0, Math.round((Date.now() - gpsState.at) / 1000))}s ago` : '\u2014';
 }
 
-document.getElementById('status-chip').onclick = () => togglePopover('popover-gps', renderGpsPopover);
+function isGpsPopoverOpen() {
+  return !document.getElementById('popover-gps').classList.contains('hidden');
+}
 
-function resyncGps() {
+// Re-renders only when the popover is actually on screen. Every field in it
+// was previously frozen at whatever it held when the popover was opened,
+// because renderGpsPopover() ran on open and nowhere else: the position
+// callback repainted the coloured dot but never the panel. Status was the
+// visible symptom (a resync sat on "Resyncing" until the popover was closed
+// and reopened, which made the fixed watch lifecycle look broken) but
+// accuracy, coordinates, elevation and age were equally stale.
+function refreshGpsPopoverIfOpen() {
+  if (isGpsPopoverOpen()) renderGpsPopover();
+}
+
+// Age counts up from the last fix, so it changes with the clock rather than
+// with incoming positions. Rendering it only on new fixes would freeze it
+// exactly when GPS drops out, which is the one moment the number matters.
+// gpsPopoverTicker and stopGpsPopoverTicker live up with closeAllPopovers;
+// see the note there for why they cannot be declared here.
+function startGpsPopoverTicker() {
+  if (gpsPopoverTicker !== null) return;
+  gpsPopoverTicker = setInterval(refreshGpsPopoverIfOpen, 1000);
+}
+
+document.getElementById('status-chip').onclick = () => {
+  togglePopover('popover-gps', renderGpsPopover);
+  // Checked after the toggle, since togglePopover decides which way it went.
+  // A timer left running behind a hidden popover would be a wakeup a second
+  // for nothing, on a device expected to sit in a pocket all day.
+  if (isGpsPopoverOpen()) startGpsPopoverTicker();
+  else stopGpsPopoverTicker();
+};
+
+// The status flip and indicator update stay synchronous so the UI reacts to
+// the tap immediately; only the watch teardown/restart is awaited.
+async function resyncGps() {
   gpsState.status = 'resyncing';
   updateGpsIndicator();
-  GPS.resync();
+  await GPS.resync();
   logInfo('GPS resynced.');
 }
 
-document.getElementById('btn-gps-resync').onclick = () => {
-  resyncGps();
+document.getElementById('btn-gps-resync').onclick = async () => {
+  await resyncGps();
   renderGpsPopover();
 };
 
@@ -1613,6 +2210,7 @@ GPS.startWatching((pos) => {
     gpsState.status = 'error';
     gpsState.error = pos.error;
     updateGpsIndicator();
+    refreshGpsPopoverIfOpen();
     logError(`GPS error: ${pos.error}`);
     return;
   }
@@ -1624,6 +2222,7 @@ GPS.startWatching((pos) => {
   gpsState.altitude = typeof pos.altitude === 'number' ? pos.altitude : null;
   gpsState.at = Date.now();
   updateGpsIndicator();
+  refreshGpsPopoverIfOpen();
 
   if (!sensorMode && typeof pos.heading === 'number' && !isNaN(pos.heading)) {
     setRawHeading(pos.heading); // fallback path also honours north calibration
@@ -1634,11 +2233,11 @@ GPS.startWatching((pos) => {
 
   if (!myMarker) {
     myMarker = L.marker([pos.lat, pos.lng], { icon: headingArrowIcon, rotation: 0, rotateWithView: true }).addTo(map);
-    myMarker.on('click', (ev) => {
+    myMarker.on('click', async (ev) => {
       // In flag/route mode the tap is meant for the map, not for the
       // marker - drop the flag / add the point right where they tapped.
       if (flagModeActive || planningRoute) handleMapTap(ev.latlng);
-      else resyncGps();
+      else await resyncGps();
     });
     applyHeadingToMarker();
     logInfo(`First GPS fix received: ${pos.lat.toFixed(5)}, ${pos.lng.toFixed(5)}`);
@@ -1659,11 +2258,11 @@ GPS.startWatching((pos) => {
   else checkNavSuggestion(pos);
 });
 
-document.getElementById('btn-locate').onclick = () => {
+document.getElementById('btn-locate').onclick = async () => {
   followMe = true;
   if (myMarker) programmaticMove(() => map.panTo(myMarker.getLatLng()));
   else logError('No GPS fix yet - check location permission is granted.');
-  resyncGps(); // recentre and ask the location provider for a fresh fix
+  await resyncGps(); // recentre and ask the location provider for a fresh fix
 };
 // Any user-initiated map gesture stops follow-me, not just a drag.
 // Pinch-zoom and two-finger rotate previously left followMe set, so the
@@ -1978,10 +2577,6 @@ function drawWaypointMarker(wp) {
 let editingFlag = null;
 let editingFlagIconType = 'flag';
 
-// 30m to offer binding at all; if the two closest routes are within 5m of
-// each other, it's ambiguous enough to ask rather than guess.
-const BIND_PROXIMITY_MILES = 30 / 1609.344;
-const BIND_TIE_MILES = 5 / 1609.344;
 
 async function openEditFlagDialog(wp, marker) {
   editingFlag = { wp, marker };
@@ -1990,17 +2585,67 @@ async function openEditFlagDialog(wp, marker) {
   document.getElementById('wp-notes').value = wp.notes || '';
   refreshEditFlagIconPicker();
   await refreshFlagBindSection();
-  openOverlay('dialog-waypoint');
+  openDialog('dialog-waypoint');
 }
 
 // Shared by the manual Bind button and auto-bind-on-drop below - which
 // routes (if any) is a point close enough to bind to, closest first.
+// Bind hit testing happens in SCREEN space, against what amounts to an
+// invisible thickened copy of each route. This mirrors the 22 px hitLine that
+// already makes routes tappable, so "close enough to bind" and "close enough
+// to tap" are the same target, and both stay constant at every zoom.
+//
+// The previous approach converted a pixel radius into a world distance and
+// then clamped it to sane metres. That clamp is what broke zoomed out: at
+// zoom 8 a 200 m cap works out to 0.4 px, so a flag dropped squarely on the
+// visible line was nowhere near binding. Measuring in pixels removes the
+// conversion, the clamp, and the latitude and rotation corrections along with
+// it, since containerPoint already accounts for all of them.
+//
+// Matching the hitLine weight: half of 22 px is the perpendicular distance
+// from the centreline to the edge of that stroke, so this binds exactly when
+// the tap lands on the drawn hit area.
+const BIND_PROXIMITY_PX = 11;
+// Two routes count as "too close to call" when their pixel distances are
+// within this of each other, rather than a fixed world distance which would
+// mean something different at every zoom.
+const BIND_TIE_PX = 4;
+
+// Perpendicular pixel distance from p to segment ab, all in container points.
+function pointToSegmentPx(p, a, b) {
+  const abx = b.x - a.x, aby = b.y - a.y;
+  const lenSq = abx * abx + aby * aby;
+  // Degenerate segment (both ends on the same pixel) reduces to point distance.
+  if (lenSq === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+  let t = ((p.x - a.x) * abx + (p.y - a.y) * aby) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t));
+}
+
+// Closest approach of a route to a point, in screen pixels.
+function routeDistancePx(point, routePoints) {
+  if (!routePoints || routePoints.length < 2) return Infinity;
+  const p = map.latLngToContainerPoint(point);
+  let best = Infinity;
+  let prev = map.latLngToContainerPoint(routePoints[0]);
+  for (let i = 1; i < routePoints.length; i++) {
+    const cur = map.latLngToContainerPoint(routePoints[i]);
+    const d = pointToSegmentPx(p, prev, cur);
+    if (d < best) best = d;
+    prev = cur;
+  }
+  return best;
+}
+
 async function findBindCandidates(point) {
   const routes = await Store.getRoutes();
   return routes
-    .map(r => ({ route: r, proj: GPS.projectOntoRoute(point, r.points) }))
-    .filter(c => c.proj && c.proj.offRouteMiles <= BIND_PROXIMITY_MILES)
-    .sort((a, b) => a.proj.offRouteMiles - b.proj.offRouteMiles);
+    // The world-space projection is still what gets stored: it supplies the
+    // snapped position and the distance along the route. Only the decision of
+    // whether a route is a candidate at all is made in screen space.
+    .map(r => ({ route: r, proj: GPS.projectOntoRoute(point, r.points), px: routeDistancePx(point, r.points) }))
+    .filter(c => c.proj && c.px <= BIND_PROXIMITY_PX)
+    .sort((a, b) => a.px - b.px);
 }
 
 async function refreshFlagBindSection() {
@@ -2013,14 +2658,21 @@ async function refreshFlagBindSection() {
   // Setting display directly rather than toggling a class - guarantees
   // exactly one of these can ever be visible, with no dependency on CSS
   // specificity/cascade order elsewhere in the stylesheet.
-  bindBtn.style.display = 'none';
-  unbindBtn.style.display = 'none';
+  // Toggled by class, not by inline style. Both buttons ship with `hidden` in
+  // the markup, and `.hidden { display: none }`, so the previous
+  // `style.display = ''` never revealed them: clearing an inline declaration
+  // does not set a value, it hands control back to the cascade, where
+  // `.hidden` still won. Both buttons were therefore invisible in every
+  // state, which meant unbinding a flag was impossible and manual binding
+  // had never worked at all.
+  bindBtn.classList.add('hidden');
+  unbindBtn.classList.add('hidden');
 
   if (wp.boundRouteId) {
     const routes = await Store.getRoutes();
     const route = routes.find(r => r.id === wp.boundRouteId);
     statusEl.textContent = route ? `Bound to route "${route.name}".` : 'Bound to a route.';
-    unbindBtn.style.display = '';
+    unbindBtn.classList.remove('hidden');
     return;
   }
 
@@ -2032,7 +2684,7 @@ async function refreshFlagBindSection() {
   statusEl.textContent = candidates.length === 1
     ? `Close to route "${candidates[0].route.name}".`
     : 'Close to more than one route.';
-  bindBtn.style.display = '';
+  bindBtn.classList.remove('hidden');
   bindBtn.onclick = () => bindFlagToRoute(candidates);
 }
 
@@ -2041,7 +2693,7 @@ async function bindFlagToRoute(candidates, reopenDialogAfterTie = true) {
   // Only ambiguous if the two closest are within the tie threshold of
   // each other - otherwise the closest one is an obvious enough choice
   // that asking would just be friction.
-  if (candidates.length > 1 && (candidates[1].proj.offRouteMiles - candidates[0].proj.offRouteMiles) <= BIND_TIE_MILES) {
+  if (candidates.length > 1 && (candidates[1].px - candidates[0].px) <= BIND_TIE_PX) {
     const pick = await askRouteChoice(candidates.map(c => c.route));
     // askRouteChoice opens its own dialog, which (like every overlay)
     // hides whatever else was open. Only reopen the flag dialog if this
@@ -2049,7 +2701,7 @@ async function bindFlagToRoute(candidates, reopenDialogAfterTie = true) {
     // auto-bind-on-drop calls this with reopenDialogAfterTie=false, since
     // forcing the edit dialog open after a plain drop would be a jarring,
     // unrequested side effect.
-    if (reopenDialogAfterTie) openOverlay('dialog-waypoint');
+    if (reopenDialogAfterTie) openDialog('dialog-waypoint');
     if (!pick) return;
     chosen = candidates.find(c => c.route.id === pick.id);
   }
@@ -2084,7 +2736,11 @@ document.getElementById('btn-unbind-flag').onclick = async () => {
     wp.boundRouteId = null;
     wp.routeDistance = null;
     await Store.saveWaypoint(wp);
-    editingFlag.marker.setIcon(buildFlagDivIcon(editingFlagIconType, false));
+    // wp.iconType, not the module-level editingFlagIconType, for the same
+    // reason spelled out in bindFlagToRoute. Unbind does not commit an
+    // unsaved icon choice, so trusting the picker's live value would leave
+    // the marker showing an icon that does not match what was just persisted.
+    editingFlag.marker.setIcon(buildFlagDivIcon(wp.iconType, false));
     logInfo(`Flag "${wp.name}" unbound from its route.`);
   } catch (e) {
     logError(`Failed to unbind flag: ${e.message}`);
@@ -2108,7 +2764,9 @@ function askRouteChoice(routes) {
       list.appendChild(btn);
     });
     document.getElementById('btn-route-choice-cancel').onclick = () => { closeOverlay('dialog-route-choice'); resolve(null); };
-    openOverlay('dialog-route-choice');
+    openDialog('dialog-route-choice');
+    // Backdrop tap means no route picked, same as Cancel.
+    dialogDismissHandlers.set('dialog-route-choice', () => { closeOverlay('dialog-route-choice'); resolve(null); });
   });
 }
 
@@ -2131,7 +2789,7 @@ document.getElementById('btn-save-waypoint').onclick = async () => {
     && (w.name || '').trim().toLowerCase() === newName.trim().toLowerCase());
   if (clash) {
     await showAlert('Name already used', `Another flag is already called "${newName}". Pick a different name.`);
-    openOverlay('dialog-waypoint'); // showAlert's dialog closed this one
+    openDialog('dialog-waypoint'); // showAlert's dialog closed this one
     return;
   }
   try {
@@ -2219,7 +2877,7 @@ async function redrawAllDataFromStore() {
       // so it has no live handler until the popup actually opens - wired
       // below via the popupopen event on each layer, which is the standard
       // way to attach behavior to interactive popup content in Leaflet.
-      const popupHtml = `<b>${r.name}</b><br>${GPS.formatDistance(dist, useMetric)}<br><button type="button" class="pill-btn route-popup-more">More</button>`;
+      const popupHtml = `<b>${r.name}</b><br>${GPS.formatDistance(dist, useMetric)}<br><button type="button" class="pill-btn route-popup-more">More</button> <button type="button" class="pill-btn route-popup-trim">Trim</button> <button type="button" class="pill-btn pill-btn-danger route-popup-delete">Delete</button>`;
       // A visible thin line plus an invisible wide one underneath sharing
       // the same popup - the thin line matches the line's real weight
       // visually, but taps register over a much wider margin around it
@@ -2227,14 +2885,38 @@ async function redrawAllDataFromStore() {
       // almost exactly, which is what made these hard to tap).
       const hitLine = L.polyline(latlngs, { color: '#000', weight: 22, opacity: 0 }).bindPopup(popupHtml);
       const visibleLine = L.polyline(latlngs, { color: '#ffb703', weight: 3, dashArray: '6,6' }).bindPopup(popupHtml);
-      const wireMoreButton = (layer) => {
+      // Must be attached to BOTH polylines. The popup can be opened from
+      // either the wide invisible hit line or the thin visible one, and each
+      // carries its own popup instance, so wiring only one leaves the buttons
+      // dead depending on exactly where the tap landed.
+      const wireRoutePopupButtons = (layer) => {
         layer.on('popupopen', (e) => {
-          const btn = e.popup.getElement()?.querySelector('.route-popup-more');
-          if (btn) btn.onclick = () => { map.closePopup(); openRouteDetailsSheet(r); };
+          const el = e.popup.getElement();
+          if (!el) return;
+          const moreBtn = el.querySelector('.route-popup-more');
+          if (moreBtn) moreBtn.onclick = () => { map.closePopup(); openRouteDetailsSheet(r); };
+          const trimBtn = el.querySelector('.route-popup-trim');
+          // Popup closed first: the trim dialog draws a preview on the map and
+          // refits the view, which an open popup would sit on top of.
+          if (trimBtn) trimBtn.onclick = () => { map.closePopup(); openTrimRouteDialog(r); };
+          const delBtn = el.querySelector('.route-popup-delete');
+          if (delBtn) delBtn.onclick = async () => {
+            // Popup closed before the prompt so a Leaflet popup and a modal
+            // dialog are never both on screen competing for the tap.
+            map.closePopup();
+            const ok = await askConfirm('Delete route?', `Delete saved route "${r.name}"?`);
+            if (!ok) return;
+            await unbindFlagsFromRoute(r.id);
+            await Store.deleteRoute(r.id);
+            if (nearbyRouteForSuggestion && nearbyRouteForSuggestion.route.id === r.id) hideNavSuggestion();
+            logInfo(`Route "${r.name}" deleted.`);
+            await redrawAllDataFromStore();
+            renderDataPanel();
+          };
         });
       };
-      wireMoreButton(hitLine);
-      wireMoreButton(visibleLine);
+      wireRoutePopupButtons(hitLine);
+      wireRoutePopupButtons(visibleLine);
       hitLine.addTo(map);
       visibleLine.addTo(map);
       sessionOverlayLines.push(hitLine, visibleLine);
@@ -2356,17 +3038,18 @@ function showAlert(title, message) {
     document.getElementById('confirm-message').textContent = message;
     const yesBtn = document.getElementById('btn-confirm-yes');
     const noBtn = document.getElementById('btn-confirm-no');
-    const prevYesText = yesBtn.textContent;
     yesBtn.textContent = 'OK';
     noBtn.classList.add('hidden');
-    openOverlay('dialog-confirm');
+    openDialog('dialog-confirm');
+    // No restore step: askConfirm() sets both buttons explicitly when it
+    // opens, so it no longer depends on this cleanup putting them back.
     const cleanup = () => {
       yesBtn.onclick = null;
-      yesBtn.textContent = prevYesText;
-      noBtn.classList.remove('hidden');
       closeOverlay('dialog-confirm');
     };
     yesBtn.onclick = () => { cleanup(); resolve(); };
+    // An alert has only one outcome, so a backdrop tap is the same as OK.
+    dialogDismissHandlers.set('dialog-confirm', () => { cleanup(); resolve(); });
   });
 }
 
@@ -2910,6 +3593,13 @@ async function handleMapTap(latlng) {
         editingFlag = { wp, marker }; // bindFlagToRoute needs this set, same as if the dialog had opened it
         await bindFlagToRoute(candidates, false);
         editingFlag = null;
+        // Auto-bind used to leave no trace outside the debug log, so a flag
+        // could be silently attached to a route, and silently moved onto it,
+        // without the user ever agreeing to either. That surfaces later in
+        // confusing ways, such as a route export carrying flags that look
+        // unrelated. A brief notice is the minimum honest feedback; the flag
+        // dialog is where it can be undone.
+        showToast(`Flag bound to nearby route. Open the flag to unbind.`);
       }
     } catch (err) {
       logError(`Failed to drop flag: ${err.message}`);
@@ -2951,7 +3641,7 @@ const RECORD_MAX_SPEED_MPS = 45;     // ~160 km/h; anything faster is a GPS tele
 
 document.getElementById('btn-record').onclick = () => {
   if (recording) stopRecordingFlow();
-  else openOverlay('dialog-start-record');
+  else openDialog('dialog-start-record');
 };
 document.getElementById('btn-start-record-yes').onclick = () => { closeOverlay('dialog-start-record'); startRecording(); };
 document.getElementById('btn-start-record-no').onclick = () => closeOverlay('dialog-start-record');
@@ -3093,11 +3783,20 @@ function updateEstimate() {
   const bbox = selectedRegion.bbox;
   const minZ = +document.getElementById('zoom-min').value;
   const maxZ = +document.getElementById('zoom-max').value;
-  let count = 0;
-  for (let z = minZ; z <= maxZ; z++) count += tilesInBboxAtZoom(bbox, z);
-  const layerCount = document.querySelectorAll('#download-layer-checks input:checked').length;
+  // Counted per layer rather than tiles-in-range times layer-count, because
+  // layers stop at different zooms and downloadRegion clamps to each one.
+  // A flat multiply would promise tiles the download correctly declines to
+  // fetch, so the estimate would read high and the progress bar would appear
+  // to finish early.
+  let total = 0;
+  const checked = Array.from(document.querySelectorAll('#download-layer-checks input:checked'));
+  for (const cb of checked) {
+    const source = Object.values(LAYER_SOURCES).find(s => s.id === cb.dataset.dlId);
+    const ceiling = source ? (source.maxNativeZoom || source.maxZoom || 19) : 19;
+    for (let z = minZ; z <= Math.min(maxZ, ceiling); z++) total += tilesInBboxAtZoom(bbox, z);
+  }
   document.getElementById('estimate-readout').textContent =
-    `Estimated tiles: ~${(count * layerCount).toLocaleString()} (roughly ${((count * layerCount * 15) / 1024).toFixed(0)} MB)`;
+    `Estimated tiles: ~${total.toLocaleString()} (roughly ${((total * 15) / 1024).toFixed(0)} MB)`;
 }
 
 function tilesInBboxAtZoom(bbox, z) {
@@ -3128,6 +3827,14 @@ document.getElementById('btn-start-download').onclick = async () => {
   document.getElementById('download-progress').classList.remove('hidden');
   logInfo(`Download started: "${selectedRegion.label}", layers=${layerIds.join(',')}, zoom ${minZoom}-${maxZoom}`);
 
+  // The progress bar was the only thing reflecting download state; the button
+  // itself still read "Start download" throughout, which looks like the tap
+  // never registered. Disabling it also stops a second tap from starting a
+  // concurrent download over the same region.
+  const startBtn = document.getElementById('btn-start-download');
+  startBtn.textContent = 'Downloading\u2026';
+  startBtn.disabled = true;
+
   try {
     await downloadRegion({
       bbox: selectedRegion.bbox, minZoom, maxZoom, layerIds,
@@ -3145,6 +3852,13 @@ document.getElementById('btn-start-download').onclick = async () => {
     });
   } catch (e) {
     logError(`Download failed: ${e.message}`);
+  } finally {
+    // In finally rather than duplicated across onDone and catch: onDone only
+    // fires on success, so a thrown download would otherwise leave the button
+    // permanently disabled and reading "Downloading", with no way to retry
+    // short of restarting the app.
+    startBtn.textContent = 'Start download';
+    startBtn.disabled = false;
   }
 };
 
@@ -3203,7 +3917,14 @@ async function renderRegionsList(listElId, statsElId) {
         logError(`Failed to delete region tiles: ${e.message}`);
       }
     };
-    li.appendChild(delBtn);
+    // Wrapped the same way as the presets, sessions and routes lists. The
+    // .danger colours live on `.item-actions button.danger`, so a delete
+    // button appended straight onto the li matches no rule at all and renders
+    // as an unstyled default button. This was the actual bug behind 5.5.
+    const actions = document.createElement('span');
+    actions.className = 'item-actions';
+    actions.appendChild(delBtn);
+    li.appendChild(actions);
     listEl.appendChild(li);
   });
 }
@@ -3226,84 +3947,566 @@ document.getElementById('btn-delete-all-maps-download').onclick = deleteAllMapDa
 
 // ---------- Sessions & Data sheet ----------
 let currentSessionName = null;
+// Null while the working data is unsaved, in which case the mirror writes to
+// current/. Set once a session is saved or loaded, which is also its folder
+// name on disk.
+let currentSessionId = null;
 
 async function renderDataPanel() {
   document.getElementById('current-session-label').textContent = currentSessionName || 'Unsaved';
   renderLayerPresetsList();
 
-  try {
-    const sessions = await Store.getSessions();
-    const sessionsList = document.getElementById('saved-sessions-list');
-    sessionsList.innerHTML = '';
-    sessions.forEach((s) => {
-      const li = document.createElement('li');
-      li.innerHTML = `<span>${s.name}<br><small>${new Date(s.savedAt).toLocaleString()} · ${s.waypoints.length} flags, ${s.routes.length} routes, ${s.tracks.length} tracks</small></span>`;
-      const actions = document.createElement('span');
-      actions.className = 'item-actions';
-      const loadBtn = document.createElement('button');
-      loadBtn.textContent = 'Load';
-      loadBtn.onclick = () => loadSessionFlow(s);
-      const delBtn = document.createElement('button');
-      delBtn.textContent = 'Delete';
-      delBtn.className = 'danger';
-      delBtn.onclick = async () => {
-        const ok = await askConfirm('Delete session?', `Delete saved session "${s.name}"? This can't be undone.`);
-        if (ok) { await Store.deleteSession(s.id); logInfo(`Session "${s.name}" deleted.`); renderDataPanel(); }
-      };
-      actions.appendChild(loadBtn);
-      actions.appendChild(delBtn);
-      li.appendChild(actions);
-      sessionsList.appendChild(li);
-    });
-  } catch (e) {
-    logError(`Failed to list sessions: ${e.message}`);
-  }
-
-  try {
-    const routes = await Store.getRoutes();
-    const routesList = document.getElementById('saved-routes-list');
-    routesList.innerHTML = '';
-    routes.forEach((r) => {
-      let dist = 0;
-      for (let i = 1; i < r.points.length; i++) dist += GPS.distanceMiles(r.points[i - 1], r.points[i]);
-      const li = document.createElement('li');
-      li.innerHTML = `<span>${r.name}<br><small>${GPS.formatDistance(dist, useMetric)}, ${r.points.length} points</small></span>`;
-      const actions = document.createElement('span');
-      actions.className = 'item-actions';
-      const loadBtn = document.createElement('button');
-      loadBtn.textContent = 'Load';
-      loadBtn.onclick = () => {
-        map.fitBounds(r.points.map(p => [p.lat, p.lng]));
-        startRoutePlanning(r.points, r.id);
-        closeOverlay('sheet-data');
-        logInfo(`Loaded route "${r.name}" for editing - tap to add more points, or Finish to re-save.`);
-      };
-      const delBtn = document.createElement('button');
-      delBtn.textContent = 'Delete';
-      delBtn.className = 'danger';
-      delBtn.onclick = async () => {
-        const ok = await askConfirm('Delete route?', `Delete saved route "${r.name}"?`);
-        if (ok) { await unbindFlagsFromRoute(r.id); await Store.deleteRoute(r.id); if (nearbyRouteForSuggestion && nearbyRouteForSuggestion.route.id === r.id) hideNavSuggestion(); logInfo(`Route "${r.name}" deleted.`); await redrawAllDataFromStore(); renderDataPanel(); }
-      };
-      actions.appendChild(loadBtn);
-      actions.appendChild(delBtn);
-      li.appendChild(actions);
-      routesList.appendChild(li);
-    });
-  } catch (e) {
-    logError(`Failed to list routes: ${e.message}`);
-  }
+  await renderSessionTree();
 
   renderRegionsList('saved-map-regions-list', 'tile-cache-stats');
+}
+
+
+
+
+// ---------- Route trimming ----------
+// Shortens a saved route from either end. Distinct from the export trim, which
+// only affects the file being written: this edits the stored route itself.
+//
+// A live preview is drawn while the sliders move, because sliders alone make
+// this guesswork: "300 m from the start" means nothing without seeing which
+// part of the line it removes.
+
+let trimPreviewLine = null;
+let trimContext = null;
+
+function cumulativeMiles(points) {
+  const out = [0];
+  for (let i = 1; i < points.length; i++) out.push(out[i - 1] + GPS.distanceMiles(points[i - 1], points[i]));
+  return out;
+}
+
+// Points remaining after removing startM from the front and endM from the
+// back, measured along the path.
+function slicedRoutePoints(points, cum, startM, endM) {
+  const totalM = cum[cum.length - 1] * 1609.344;
+  const fromM = Math.min(startM, totalM);
+  const toM = Math.max(fromM, totalM - endM);
+  let a = 0;
+  while (a < points.length - 1 && cum[a] * 1609.344 < fromM) a++;
+  let b = points.length - 1;
+  while (b > a && cum[b] * 1609.344 > toM) b--;
+  // A route needs two points to be a line at all, so the slice never returns
+  // fewer; the dialog blocks saving in that case rather than silently keeping
+  // more than the sliders show.
+  if (b - a < 1) return points.slice(a, a + 2).length === 2 ? points.slice(a, a + 2) : points.slice(0, 2);
+  return points.slice(a, b + 1);
+}
+
+function clearTrimPreview() {
+  if (trimPreviewLine) { map.removeLayer(trimPreviewLine); trimPreviewLine = null; }
+}
+
+function renderTrimPreview() {
+  if (!trimContext) return;
+  const { route, cum } = trimContext;
+  const startM = +document.getElementById('trim-route-start').value || 0;
+  const endM = +document.getElementById('trim-route-end').value || 0;
+  const kept = slicedRoutePoints(route.points, cum, startM, endM);
+
+  clearTrimPreview();
+  trimPreviewLine = L.polyline(kept.map(p => [p.lat, p.lng]), {
+    color: '#f5c542', weight: 6, opacity: 0.95
+  }).addTo(map);
+
+  const keptMiles = cumulativeMiles(kept).pop() || 0;
+  document.getElementById('trim-route-start-out').textContent = trimLabel(startM);
+  document.getElementById('trim-route-end-out').textContent = trimLabel(endM);
+  document.getElementById('trim-route-summary').textContent =
+    `${GPS.formatDistance(keptMiles, useMetric)} of ${GPS.formatDistance(trimContext.totalMiles, useMetric)} kept, ${kept.length} of ${route.points.length} points.`;
+
+  // Bound flags are the non-obvious casualty of a trim: their distance along
+  // the route shifts, and any that sat on a removed section are no longer on
+  // the route at all. Said up front rather than discovered afterwards.
+  const affected = trimContext.boundFlags.filter(f => {
+    const d = f.routeDistance;
+    if (typeof d !== 'number') return false;
+    return d * 1609.344 < startM || d * 1609.344 > (trimContext.totalMiles * 1609.344 - endM);
+  }).length;
+  const warn = document.getElementById('trim-route-warning');
+  warn.textContent = kept.length < 2
+    ? 'A route needs at least two points.'
+    : affected
+      ? `${affected} bound flag(s) fall outside the trimmed route and will be unbound.`
+      : '';
+  document.getElementById('btn-trim-route-save').disabled = kept.length < 2;
+}
+
+async function openTrimRouteDialog(route) {
+  const points = route.points || [];
+  if (points.length < 3) {
+    await showAlert('Too short to trim', 'This route needs more than two points before it can be trimmed.');
+    return;
+  }
+  const cum = cumulativeMiles(points);
+  const totalMiles = cum[cum.length - 1];
+  const totalMetres = Math.floor(totalMiles * 1609.344);
+  const allFlags = await Store.getWaypoints();
+
+  trimContext = {
+    route, cum, totalMiles,
+    boundFlags: allFlags.filter(w => w.boundRouteId === route.id)
+  };
+
+  for (const which of ['start', 'end']) {
+    const el = document.getElementById(`trim-route-${which}`);
+    // Capped below the full length so the two sliders cannot between them
+    // consume the entire route.
+    el.max = Math.max(1, Math.floor(totalMetres * 0.45));
+    el.step = Math.max(1, Math.round(totalMetres / 200));
+    el.value = 0;
+    el.oninput = renderTrimPreview;
+  }
+
+  map.fitBounds(points.map(p => [p.lat, p.lng]));
+  renderTrimPreview();
+
+  // Deliberately NOT openDialog: that dims the map behind a backdrop, and the
+  // map is exactly what needs to stay visible here. Same reasoning as the
+  // navigation route picker, which bypasses the overlay system for the same
+  // reason.
+  const panel = document.getElementById('panel-trim-route');
+  // Placed low on the first open so it sits clear of the route, which the
+  // fitBounds above has just centred. Position persists across opens once the
+  // user has moved it, since they moved it somewhere for a reason.
+  if (!panel.style.top) {
+    panel.style.left = '50%';
+    panel.style.top = `${Math.max(80, window.innerHeight - 260)}px`;
+    panel.style.transform = 'translateX(-50%)';
+  }
+  panel.classList.remove('hidden');
+  if (!panel.dataset.draggable) {
+    makeDraggable(panel);
+    // Wired once. Re-registering on every open would stack duplicate handlers
+    // and make the panel move several times the drag distance.
+    panel.dataset.draggable = 'true';
+  }
+}
+
+function closeTrimRouteDialog() {
+  clearTrimPreview();
+  trimContext = null;
+  document.getElementById('panel-trim-route').classList.add('hidden');
+}
+
+document.getElementById('btn-trim-route-cancel').onclick = closeTrimRouteDialog;
+
+document.getElementById('btn-trim-route-save').onclick = async () => {
+  if (!trimContext) return closeTrimRouteDialog();
+  const { route, cum } = trimContext;
+  const startM = +document.getElementById('trim-route-start').value || 0;
+  const endM = +document.getElementById('trim-route-end').value || 0;
+  if (!startM && !endM) return closeTrimRouteDialog();
+
+  const kept = slicedRoutePoints(route.points, cum, startM, endM);
+  if (kept.length < 2) return;
+
+  const ok = await askConfirm('Trim this route?',
+    `The route will be shortened to ${GPS.formatDistance(cumulativeMiles(kept).pop() || 0, useMetric)}. The removed sections can't be recovered.`);
+  if (!ok) return;
+
+  try {
+    await Store.saveRoute({ ...route, points: kept });
+
+    // Every bound flag's distance along the route is measured from the old
+    // start, so all of them are stale after a trim, not just the ones on a
+    // removed section. Re-projecting is the only way the numbers stay
+    // meaningful, and anything now too far from the line is unbound.
+    let rebound = 0, unbound = 0;
+    for (const wp of trimContext.boundFlags) {
+      const proj = GPS.projectOntoRoute(wp, kept);
+      if (proj && proj.offRouteMiles * 1609.344 <= 60) {
+        wp.routeDistance = proj.distanceAlongRouteMiles;
+        await Store.saveWaypoint(wp);
+        rebound++;
+      } else {
+        wp.boundRouteId = null;
+        wp.routeDistance = null;
+        await Store.saveWaypoint(wp);
+        unbound++;
+      }
+    }
+
+    closeTrimRouteDialog();
+    await redrawAllDataFromStore();
+    renderDataPanel();
+    const extra = unbound ? ` ${unbound} flag(s) unbound, ${rebound} kept.` : '';
+    logInfo(`Route "${route.name}" trimmed to ${kept.length} points.${extra}`);
+    showToast(`Route trimmed.${extra}`);
+  } catch (e) {
+    logError(`Could not trim route: ${e.message}`);
+    await showAlert('Trim failed', e.message);
+  }
+};
+
+// ---------- Session tree ----------
+// Built entirely from the database, never from the filesystem. The mirror can
+// be stale or unavailable and the tree still renders correctly, which is the
+// whole point of keeping IndexedDB authoritative.
+
+const RECORD_GROUPS = ['waypoints', 'routes', 'tracks'];
+const treeExpanded = new Set(['current']);
+
+const leafKey = (ownerKey, group, id) => `${ownerKey}/${group}/${id}`;
+
+async function buildTreeModel() {
+  const [waypoints, routes, tracks, sessions] = await Promise.all([
+    Store.getWaypoints(), Store.getRoutes(), Store.getTracks(), Store.getSessions()
+  ]);
+  const nodes = [{
+    key: 'current',
+    label: currentSessionName || 'Current session',
+    sub: currentSessionId ? 'Loaded' : 'Unsaved',
+    sessionId: currentSessionId,
+    isCurrent: true,
+    groups: { waypoints, routes, tracks }
+  }];
+  for (const sess of sessions) {
+    // The loaded session already appears as the live one at the top; listing
+    // its stored snapshot again would show the same session twice, with
+    // whichever copy is staler looking like a separate thing.
+    if (sess.id === currentSessionId) continue;
+    nodes.push({
+      key: `session:${sess.id}`,
+      label: sess.name,
+      sub: new Date(sess.savedAt).toLocaleDateString(),
+      sessionId: sess.id,
+      isCurrent: false,
+      groups: {
+        waypoints: sess.waypoints || [], routes: sess.routes || [], tracks: sess.tracks || []
+      }
+    });
+  }
+  return nodes;
+}
+
+function leavesOf(node, group) {
+  if (group) return (node.groups[group] || []).map(r => leafKey(node.key, group, r.id));
+  return RECORD_GROUPS.flatMap(g => leavesOf(node, g));
+}
+
+// unchecked | indeterminate | checked, derived rather than stored.
+function checkStateOf(keys) {
+  if (!keys.length) return 'unchecked';
+  const n = keys.filter(k => treeSelected.has(k)).length;
+  return n === 0 ? 'unchecked' : n === keys.length ? 'checked' : 'indeterminate';
+}
+
+function setSelection(keys, on) {
+  for (const k of keys) { if (on) treeSelected.add(k); else treeSelected.delete(k); }
+}
+
+function makeCheckbox(keys, onToggle) {
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.className = 'tree-check';
+  const state = checkStateOf(keys);
+  cb.checked = state === 'checked';
+  cb.indeterminate = state === 'indeterminate';
+  cb.onclick = (e) => {
+    e.stopPropagation();
+    // Indeterminate counts as "not all selected", so the tap selects the rest
+    // rather than clearing what is already ticked.
+    setSelection(keys, checkStateOf(keys) !== 'checked');
+    onToggle();
+  };
+  return cb;
+}
+
+function treeRow({ depth, expandable, isFolder, expanded, label, sub, count, keys, active, action, onToggleExpand, onRerender }) {
+  const li = document.createElement('li');
+  const row = document.createElement('div');
+  row.className = `tree-row depth-${depth}${active ? ' is-active' : ''}`;
+
+  const twisty = document.createElement('span');
+  twisty.className = `tree-twisty${expandable ? '' : ' leaf'}`;
+  twisty.textContent = expanded ? '\u25be' : '\u25b8';
+  row.appendChild(twisty);
+
+  if (treeSelectMode && keys && keys.length) row.appendChild(makeCheckbox(keys, onRerender));
+
+  // Folder or file glyph, so depth is readable without counting indentation.
+  // Keyed on what the row IS, not on whether it can be opened: an empty
+  // tracks group is still a folder, and drawing it as a file made it look
+  // like a record that happened to be called "tracks".
+  const icon = document.createElement('span');
+  icon.className = 'tree-icon';
+  icon.innerHTML = ICONS[isFolder ? 'folder' : 'file'] || '';
+  row.appendChild(icon);
+
+  const labelEl = document.createElement('span');
+  labelEl.className = 'tree-label';
+  const nameEl = document.createElement('span');
+  nameEl.className = 'tree-name';
+  nameEl.textContent = label;
+  labelEl.appendChild(nameEl);
+  if (sub) {
+    const small = document.createElement('small');
+    small.textContent = sub;
+    labelEl.appendChild(small);
+  }
+  row.appendChild(labelEl);
+
+  if (typeof count === 'number') {
+    const c = document.createElement('span');
+    c.className = 'tree-count';
+    c.textContent = String(count);
+    row.appendChild(c);
+  }
+
+  // Actions are explicit buttons rather than a row tap, because the row tap is
+  // already expand/collapse and the two would fight. Hidden during select mode
+  // so a mis-tap while ticking boxes cannot load a session over your work.
+  if (action && !treeSelectMode) {
+    const btn = document.createElement('button');
+    btn.textContent = action.label;
+    btn.className = 'tree-action';
+    btn.onclick = (e) => { e.stopPropagation(); action.run(); };
+    row.appendChild(btn);
+  }
+
+  if (expandable) row.onclick = onToggleExpand;
+  li.appendChild(row);
+  return li;
+}
+
+function describeRecord(group, rec) {
+  if (group === 'routes' && rec.points) {
+    let d = 0;
+    for (let i = 1; i < rec.points.length; i++) d += GPS.distanceMiles(rec.points[i - 1], rec.points[i]);
+    return `${GPS.formatDistance(d, useMetric)}, ${rec.points.length} points`;
+  }
+  if (group === 'tracks' && rec.points) return `${rec.points.length} points`;
+  if (group === 'waypoints' && rec.boundRouteId) return 'Bound to a route';
+  return '';
+}
+
+function recordAction(group, rec) {
+  if (group === 'routes') {
+    return { label: 'Edit', run: () => {
+      map.fitBounds(rec.points.map(p => [p.lat, p.lng]));
+      startRoutePlanning(rec.points, rec.id);
+      closeOverlay('sheet-data');
+      logInfo(`Loaded route "${rec.name}" for editing - tap to add more points, or Finish to re-save.`);
+    } };
+  }
+  if (group === 'waypoints') {
+    return { label: 'Show', run: () => { map.panTo([rec.lat, rec.lng]); closeOverlay('sheet-data'); } };
+  }
+  if (group === 'tracks' && rec.points && rec.points.length) {
+    return { label: 'Show', run: () => { map.fitBounds(rec.points.map(p => [p.lat, p.lng])); closeOverlay('sheet-data'); } };
+  }
+  return null;
+}
+
+async function renderSessionTree() {
+  const root = document.getElementById('session-tree');
+  if (!root) return;
+  const rerender = () => { renderSessionTree(); };
+
+  // The model is read BEFORE the list is touched, and rows are built into a
+  // detached fragment that replaces the old contents in one operation. The
+  // previous order (clear, then await the database) left the list visibly
+  // empty for the length of the read, which is the flicker seen on every
+  // expand and on entering or leaving select mode.
+  let nodes;
+  try {
+    nodes = await buildTreeModel();
+  } catch (e) {
+    logError(`Failed to build session list: ${e.message}`);
+    return;
+  }
+  const frag = document.createDocumentFragment();
+
+  for (const node of nodes) {
+    const nodeLeaves = leavesOf(node);
+    const total = nodeLeaves.length;
+    const expanded = treeExpanded.has(node.key);
+    frag.appendChild(treeRow({
+      depth: 0, expandable: true, isFolder: true, expanded,
+      label: node.label, sub: node.sub, count: total,
+      keys: nodeLeaves, active: node.isCurrent,
+      action: node.isCurrent ? null : { label: 'Load', run: () => loadSessionFlow({ id: node.sessionId, name: node.label }) },
+      onToggleExpand: () => {
+        if (expanded) treeExpanded.delete(node.key); else treeExpanded.add(node.key);
+        rerender();
+      },
+      onRerender: rerender
+    }));
+    if (!expanded) continue;
+
+    for (const group of RECORD_GROUPS) {
+      const records = node.groups[group] || [];
+      const groupKey = `${node.key}/${group}`;
+      const groupExpanded = treeExpanded.has(groupKey);
+      const groupLeaves = leavesOf(node, group);
+      frag.appendChild(treeRow({
+        depth: 1, expandable: records.length > 0, isFolder: true, expanded: groupExpanded,
+        label: group, count: records.length, keys: groupLeaves,
+        onToggleExpand: () => {
+          if (groupExpanded) treeExpanded.delete(groupKey); else treeExpanded.add(groupKey);
+          rerender();
+        },
+        onRerender: rerender
+      }));
+      if (!groupExpanded) continue;
+      for (const rec of records) {
+        frag.appendChild(treeRow({
+          depth: 2, expandable: false, isFolder: false, expanded: false,
+          label: rec.name || '(unnamed)',
+          sub: describeRecord(group, rec),
+          keys: [leafKey(node.key, group, rec.id)],
+          // Only live records are actionable. Editing a route inside a
+          // session that is not loaded would mean silently loading it first,
+          // which is too much to happen from one tap.
+          action: node.isCurrent ? recordAction(group, rec) : null,
+          onRerender: rerender
+        }));
+      }
+    }
+  }
+
+  if (!nodes.length) {
+    const li = document.createElement('li');
+    li.className = 'tree-empty';
+    li.textContent = 'No sessions yet.';
+    frag.appendChild(li);
+  }
+
+  // Single swap: the old rows are replaced by the new ones in one paint, so
+  // there is no intermediate empty state to see.
+  root.replaceChildren(frag);
+}
+
+document.getElementById('btn-tree-select').onclick = () => {
+  treeSelectMode = !treeSelectMode;
+  if (!treeSelectMode) treeSelected.clear();
+  document.getElementById('btn-tree-select').textContent = treeSelectMode ? 'Cancel' : 'Select';
+  document.getElementById('btn-tree-delete').classList.toggle('hidden', !treeSelectMode);
+  renderSessionTree();
+};
+
+// Selection is cleared whenever the Data sheet closes. A selection that
+// survives a close is how someone deletes something they ticked ten minutes
+// ago and forgot about.
+function resetTreeSelection() {
+  if (!treeSelectMode && !treeSelected.size) return;
+  treeSelectMode = false;
+  treeSelected.clear();
+  const btn = document.getElementById('btn-tree-select');
+  if (btn) btn.textContent = 'Select';
+  const del = document.getElementById('btn-tree-delete');
+  if (del) del.classList.add('hidden');
+}
+
+document.getElementById('btn-tree-delete').onclick = async () => {
+  if (!treeSelected.size) { await showAlert('Nothing selected', 'Tick the items you want to delete first.'); return; }
+  const nodes = await buildTreeModel();
+
+  // A session whose every record is ticked is treated as "delete the session",
+  // which is what ticking the session checkbox visibly did. Emptying a session
+  // but leaving it behind would be a surprising result of that gesture.
+  const wholeSessions = [];
+  const perRecord = [];
+  for (const node of nodes) {
+    const leaves = leavesOf(node);
+    if (!leaves.length) continue;
+    const selected = leaves.filter(k => treeSelected.has(k));
+    if (!selected.length) continue;
+    if (selected.length === leaves.length && !node.isCurrent) wholeSessions.push(node);
+    else perRecord.push({ node, keys: selected });
+  }
+
+  const recordCount = perRecord.reduce((n, p) => n + p.keys.length, 0)
+    + wholeSessions.reduce((n, s) => n + leavesOf(s).length, 0);
+  const parts = [];
+  if (wholeSessions.length) parts.push(`${wholeSessions.length} session(s)`);
+  if (recordCount) parts.push(`${recordCount} item(s)`);
+  const ok = await askConfirm('Delete selected?',
+    `This will permanently delete ${parts.join(' and ')}, including their files. This can't be undone.`);
+  if (!ok) return;
+
+  try {
+    for (const s of wholeSessions) {
+      await Store.deleteSession(s.sessionId);
+      try { await Storage.deleteSessionFolder(s.sessionId); }
+      catch (e) { logError(`Session removed, but its folder was not deleted: ${e.message}`); }
+    }
+    for (const { node, keys } of perRecord) {
+      for (const key of keys) {
+        const [, group, id] = key.split('/');
+        if (node.isCurrent) {
+          // Live records go through the store, so the mirror deletes the file
+          // for us via the change notification.
+          if (group === 'waypoints') await Store.deleteWaypoint(id);
+          else if (group === 'routes') await Store.deleteRoute(id);
+          else await Store.deleteTrack(id);
+        } else {
+          await removeRecordFromSavedSession(node.sessionId, group, id);
+        }
+      }
+    }
+    treeSelected.clear();
+    treeSelectMode = false;
+    document.getElementById('btn-tree-select').textContent = 'Select';
+    document.getElementById('btn-tree-delete').classList.add('hidden');
+    await redrawAllDataFromStore();
+    renderDataPanel();
+    logInfo(`Deleted ${wholeSessions.length} session(s) and ${recordCount} item(s).`);
+  } catch (e) {
+    logError(`Delete failed: ${e.message}`);
+    await showAlert('Delete failed', e.message);
+  }
+};
+
+// Removes one record from a session that is not currently loaded. Its data
+// lives in the session's stored snapshot rather than the working stores, so
+// the change notification does not fire and the mirrored file has to be
+// removed explicitly.
+async function removeRecordFromSavedSession(sessionId, group, recordId) {
+  const sessions = await Store.getSessions();
+  const sess = sessions.find(x => x.id === sessionId);
+  if (!sess) return;
+  const list = sess[group] || [];
+  const record = list.find(r => r.id === recordId);
+  sess[group] = list.filter(r => r.id !== recordId);
+  await Store.putSession(sess);
+  if (record && Storage.isSafeSessionId(sessionId)) {
+    try {
+      const filename = Storage.safeFilename(`${record.name || 'untitled'}--${record.id}`, '.gpx');
+      await Storage.deleteRecordFile(Storage.sessionDir(sessionId), group, filename);
+    } catch (e) {
+      logError(`Record removed, but its file was not deleted: ${e.message}`);
+    }
+  }
 }
 
 document.getElementById('btn-save-session').onclick = async () => {
   const name = await askName('Save session as', currentSessionName || `Session ${new Date().toLocaleDateString()}`);
   if (name === null) return;
   try {
-    await Store.saveSession(name);
+    const id = Storage.makeSessionId(name);
+    await Store.saveSession(name, id);
     currentSessionName = name;
-    logInfo(`Session "${name}" saved.`);
+    currentSessionId = id;
+
+    // The mirror target follows the active session, so from here on edits land
+    // in this session's own folder rather than continuing to pile up in
+    // current/. Everything stays loaded; only where it is written changes.
+    await Storage.ensureStorageRoot();
+    Mirror.setActiveSession(id);
+    await Mirror.rebuildMirror();
+    // current/ is scratch space for unsaved work. Its contents have just been
+    // written into the session folder, so leaving copies behind would make the
+    // same records appear twice on disk.
+    await Storage.clearCurrentFolder();
+
+    logInfo(`Session "${name}" saved as ${id}.`);
     renderDataPanel();
   } catch (e) {
     logError(`Failed to save session: ${e.message}`);
@@ -3320,6 +4523,11 @@ document.getElementById('btn-new-session').onclick = async () => {
     await Store.clearCurrentData();
     clearAllDataLayers();
     currentSessionName = null;
+    currentSessionId = null;
+    // Back to scratch space. The saved session's folder is deliberately left
+    // alone: starting a new session must never delete a session you saved.
+    Mirror.setActiveSession(null);
+    await Storage.clearCurrentFolder();
     cancelRoutePlanning();
     if (recording) await stopRecordingFlow();
     setFlagMode(false);
@@ -3329,6 +4537,49 @@ document.getElementById('btn-new-session').onclick = async () => {
     logError(`Failed to start new session: ${e.message}`);
   }
 };
+
+// Deleting a session removes its folder as well as its database record, so
+// the confirmation states how many files that is. A session folder is often
+// the only remaining copy of an old trip, and "delete 1 session" reads very
+// differently from "delete 1 session and 214 files".
+async function deleteSessionFlow(session) {
+  let fileCount = 0;
+  try {
+    if (Storage.isSafeSessionId(session.id)) {
+      fileCount = await Storage.countFilesUnder(Storage.sessionDir(session.id));
+    }
+  } catch (e) {
+    // Counting is a courtesy. If storage is unavailable the database record
+    // can still be deleted, and the folder cleaned up later.
+  }
+  const detail = fileCount
+    ? `Delete saved session "${session.name}", including ${fileCount} file(s) in its folder? This can't be undone.`
+    : `Delete saved session "${session.name}"? This can't be undone.`;
+  const ok = await askConfirm('Delete session?', detail);
+  if (!ok) return;
+  try {
+    await Store.deleteSession(session.id);
+    try {
+      await Storage.deleteSessionFolder(session.id);
+    } catch (e) {
+      // The guard refused, or storage is gone. The record is already deleted,
+      // so say so plainly rather than implying nothing happened.
+      logError(`Session removed, but its folder was not deleted: ${e.message}`);
+    }
+    // Deleting the session you are currently in leaves the working data
+    // orphaned, so fall back to scratch space rather than continuing to mirror
+    // into a folder that no longer exists.
+    if (currentSessionId === session.id) {
+      currentSessionId = null;
+      currentSessionName = null;
+      Mirror.setActiveSession(null);
+    }
+    logInfo(`Session "${session.name}" deleted.`);
+    renderDataPanel();
+  } catch (e) {
+    logError(`Failed to delete session: ${e.message}`);
+  }
+}
 
 async function loadSessionFlow(session) {
   const hasData = await Store.hasAnyCurrentData();
@@ -3340,6 +4591,9 @@ async function loadSessionFlow(session) {
     await Store.loadSession(session.id);
     await redrawAllDataFromStore();
     currentSessionName = session.name;
+    currentSessionId = session.id;
+    // Edits from here belong to the loaded session, so the mirror follows it.
+    Mirror.setActiveSession(session.id);
     logInfo(`Session "${session.name}" loaded.`);
     renderDataPanel();
   } catch (e) {

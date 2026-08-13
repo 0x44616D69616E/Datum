@@ -107,8 +107,9 @@
 
     <div class="data-section">
       <h3>Layer presets</h3>
-      <p class="hint">Save the current order, visibility, and transparency of every layer as a named preset you can load again later.</p>
+      <p class="hint">Save the current order, visibility, and transparency of every layer as a named preset you can load again later. Saved presets are also written to your storage folder as small shareable files, containing layer settings only, no locations.</p>
       <button id="btn-save-layer-preset" class="btn-primary full-width">Save current layers as preset</button>
+      <button id="btn-load-presets-from-folder" class="btn-secondary full-width">Load presets from folder</button>
       <ul id="saved-layer-presets-list" class="data-list"></ul>
     </div>
   </div>
@@ -161,14 +162,49 @@
         <button id="btn-save-session" class="btn-primary">Save session</button>
         <button id="btn-new-session" class="btn-secondary">New session</button>
       </div>
-      <p class="hint">A session is your flags, routes, and tracks. Downloaded map data is always kept separately, no matter what.</p>
-      <ul id="saved-sessions-list" class="data-list"></ul>
+      <p class="hint">A session is your waypoints, routes, and tracks. Downloaded map data is always kept separately, no matter what.</p>
+      <div class="button-row">
+        <button id="btn-tree-select" class="btn-secondary">Select</button>
+        <button id="btn-tree-delete" class="btn-danger hidden">Delete selected</button>
+      </div>
+      <ul id="session-tree" class="tree"></ul>
     </div>
 
     <div class="data-section">
-      <h3>Saved routes</h3>
-      <ul id="saved-routes-list" class="data-list"></ul>
+      <h3>Share &amp; import</h3>
+      <p class="hint">Your waypoints, routes and tracks are written to your storage folder as GPX automatically as you create them, so there is nothing to export for a backup. They live in <b>current/</b> until you save a session, then move into that session's own folder.</p>
+      <p class="hint">GPX is the standard outdoor format, so those files open in Garmin, Gaia GPS, CalTopo, OsmAnd and most handheld units. To bring a file in, drop it into <b>current/waypoints</b>, <b>current/routes</b> or <b>current/tracks</b> and use Import, or just tap the file and choose Datum.</p>
+      <label class="check-row">
+        <input type="checkbox" id="share-include-timestamps" checked />
+        <span>Include times<br><small>A path alone shows where a trail goes. Times also reveal when you were out.</small></span>
+      </label>
+      <label class="check-row">
+        <input type="checkbox" id="share-trim-enabled" />
+        <span>Trim the ends of tracks<br><small>Tracks often start and stop at home. Trimming keeps the useful middle without publishing where you live.</small></span>
+      </label>
+      <div id="share-trim-controls" class="trim-controls is-disabled">
+        <label class="slider-row">
+          <span class="slider-label">From the start</span>
+          <input type="range" id="share-trim-start" min="0" max="1000" step="25" value="0" disabled />
+          <output id="share-trim-start-out" class="slider-out">0</output>
+        </label>
+        <label class="slider-row">
+          <span class="slider-label">From the end</span>
+          <input type="range" id="share-trim-end" min="0" max="1000" step="25" value="0" disabled />
+          <output id="share-trim-end-out" class="slider-out">0</output>
+        </label>
+      </div>
+      <p class="hint">Packaging writes one GPX containing an entire session into that session's folder, which is the single file to send someone.</p>
+      <div class="button-row">
+        <button id="btn-package-session" class="btn-primary">Package session as one file</button>
+        <button id="btn-import-share" class="btn-secondary">Import from folder</button>
+      </div>
+      <div class="button-row">
+        <button id="btn-tidy-storage" class="btn-secondary">Tidy up old folders</button>
+      </div>
     </div>
+
+
 
     <div class="data-section">
       <h3>Layer presets</h3>
@@ -289,11 +325,11 @@
 </div>
 
 <div id="dialog-onboarding-storage" class="dialog dialog-centered hidden">
-  <h2>Set up storage?</h2>
-  <p class="hint" style="font-size:14.5px; color: var(--text);">Datum can back up your flags, routes, tracks, and settings to a folder on your device, so you can restore them later or move them to a new phone. You can do this later from Settings instead.</p>
+  <h2>Choose a storage folder?</h2>
+  <p class="hint" style="font-size:14.5px; color: var(--text);">Datum saves your flags, routes and tracks as standard GPX files you can open in other apps, back up, or share. These go in <b>Documents/Datum</b> unless you pick somewhere else. You can change this any time in Settings.</p>
   <div class="dialog-actions">
-    <button id="btn-onboarding-storage-later" class="btn-secondary">Later</button>
-    <button id="btn-onboarding-storage-setup" class="btn-primary">Set up now</button>
+    <button id="btn-onboarding-storage-later" class="btn-secondary">Use Documents</button>
+    <button id="btn-onboarding-storage-setup" class="btn-primary">Choose folder</button>
   </div>
 </div>
 
@@ -307,7 +343,7 @@
     <button id="btn-folder-documents" class="btn-secondary full-width">Documents</button>
   </div>
   <div class="dialog-actions">
-    <button id="btn-folder-downloads" class="btn-secondary full-width">Downloads</button>
+    <button id="btn-folder-downloads" class="btn-secondary full-width">Download folder</button>
   </div>
 </div>
 
@@ -491,5 +527,34 @@
 <script src="lib/leaflet/leaflet.js"></script>
 <script src="lib/leaflet/leaflet-rotate.js"></script>
 <script type="module" src="js/app.js"></script>
+<!-- Floating rather than modal: the whole point of the sliders is watching the
+     preview on the map, so a centred dialog with a dimmed backdrop would cover
+     the thing being adjusted. Draggable so it can be moved off whichever part
+     of the route matters. -->
+<div id="panel-trim-route" class="float-panel hidden">
+  <div class="float-panel-head">
+    <span class="float-panel-title">Trim route</span>
+    <span class="float-panel-hint">drag to move</span>
+  </div>
+  <label class="slider-row compact">
+    <span class="slider-label">Start</span>
+    <input type="range" id="trim-route-start" min="0" max="100" step="1" value="0" />
+    <output id="trim-route-start-out" class="slider-out">0</output>
+  </label>
+  <label class="slider-row compact">
+    <span class="slider-label">End</span>
+    <input type="range" id="trim-route-end" min="0" max="100" step="1" value="0" />
+    <output id="trim-route-end-out" class="slider-out">0</output>
+  </label>
+  <p class="float-panel-summary" id="trim-route-summary"></p>
+  <p class="float-panel-warning" id="trim-route-warning"></p>
+  <div class="float-panel-actions">
+    <button id="btn-trim-route-cancel" class="pill-btn pill-btn-ghost">Cancel</button>
+    <button id="btn-trim-route-save" class="pill-btn pill-btn-accent">Save</button>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
 </body>
 </html>
