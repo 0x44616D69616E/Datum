@@ -240,4 +240,4 @@ Datum is free with no ads and no subscription. If you want to support the projec
 
 - Developed by [0x44616D69616E](https://github.com/0x44616D69616E)
 - Map data: USGS The National Map, OpenTopoMap (CC-BY-SA), Esri/Maxar/Earthstar Geographics, Waymarked Trails, OpenStreetMap contributors, BLM, RainViewer, US Census Bureau, Natural Earth
-- Built with [Leaflet](https://leafletjs.com/), [leaflet-rotate](https://github.com/fnicollier/Leaflet.Rotate), and [Capacitor](https://capacitorjs.com/)
+- Built with [Leaflet](https://leafletjs.com/), [leaflet-rotate](https://github.com/Raruto/leaflet-rotate), and [Capacitor](https://capacitorjs.com/)
