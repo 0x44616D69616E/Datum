@@ -162,44 +162,49 @@
         <button id="btn-save-session" class="btn-primary">Save session</button>
         <button id="btn-new-session" class="btn-secondary">New session</button>
       </div>
-      <p class="hint">A session is your flags, routes, and tracks. Downloaded map data is always kept separately, no matter what.</p>
-      <ul id="saved-sessions-list" class="data-list"></ul>
+      <p class="hint">A session is your waypoints, routes, and tracks. Downloaded map data is always kept separately, no matter what.</p>
+      <div class="button-row">
+        <button id="btn-tree-select" class="btn-secondary">Select</button>
+        <button id="btn-tree-delete" class="btn-danger hidden">Delete selected</button>
+      </div>
+      <ul id="session-tree" class="tree"></ul>
     </div>
 
     <div class="data-section">
       <h3>Share &amp; import</h3>
-      <p class="hint">Flags, routes, tracks and sessions are saved to your storage folder as GPX, the standard outdoor format. Files work in Garmin, Gaia GPS, CalTopo, OsmAnd and most handheld units, and files from those apps can be imported here. Sharing a route also includes the flags bound to it, so those stay connected when someone else imports it into Datum.</p>
+      <p class="hint">Your waypoints, routes and tracks are written to your storage folder as GPX automatically as you create them, so there is nothing to export for a backup. They live in <b>current/</b> until you save a session, then move into that session's own folder.</p>
+      <p class="hint">GPX is the standard outdoor format, so those files open in Garmin, Gaia GPS, CalTopo, OsmAnd and most handheld units. To bring a file in, drop it into <b>current/waypoints</b>, <b>current/routes</b> or <b>current/tracks</b> and use Import, or just tap the file and choose Datum.</p>
       <label class="check-row">
         <input type="checkbox" id="share-include-timestamps" checked />
         <span>Include times<br><small>A path alone shows where a trail goes. Times also reveal when you were out.</small></span>
       </label>
       <label class="check-row">
-        <input type="checkbox" id="share-include-bound-flags" checked />
-        <span>Include flags bound to a route<br><small>A route file also carries the flags attached to that route, so they stay connected for another Datum user. Note that dropping a flag onto a route binds it automatically, so this can include more than you expect.</small></span>
+        <input type="checkbox" id="share-trim-enabled" />
+        <span>Trim the ends of tracks<br><small>Tracks often start and stop at home. Trimming keeps the useful middle without publishing where you live.</small></span>
       </label>
-      <label class="check-row">
-        <input type="checkbox" id="share-include-extensions" checked />
-        <span>Include Datum extras<br><small>Flag icons and flag-to-route bindings, so a share into another copy of Datum arrives complete. These sit in GPX's standard extensions element, which other apps ignore. Turn off for the plainest possible file.</small></span>
-      </label>
-      <label>Trim from each end of tracks
-        <select id="share-trim-ends">
-          <option value="0" selected>Don't trim</option>
-          <option value="100">100 m</option>
-          <option value="250">250 m</option>
-          <option value="500">500 m</option>
-        </select>
-      </label>
-      <p class="hint">Tracks often start and stop at home. Trimming keeps the useful middle without publishing where you live.</p>
+      <div id="share-trim-controls" class="trim-controls is-disabled">
+        <label class="slider-row">
+          <span class="slider-label">From the start</span>
+          <input type="range" id="share-trim-start" min="0" max="1000" step="25" value="0" disabled />
+          <output id="share-trim-start-out" class="slider-out">0</output>
+        </label>
+        <label class="slider-row">
+          <span class="slider-label">From the end</span>
+          <input type="range" id="share-trim-end" min="0" max="1000" step="25" value="0" disabled />
+          <output id="share-trim-end-out" class="slider-out">0</output>
+        </label>
+      </div>
+      <p class="hint">Packaging writes one GPX containing an entire session into that session's folder, which is the single file to send someone.</p>
       <div class="button-row">
-        <button id="btn-export-all-share" class="btn-primary">Export all to folder</button>
+        <button id="btn-package-session" class="btn-primary">Package session as one file</button>
         <button id="btn-import-share" class="btn-secondary">Import from folder</button>
+      </div>
+      <div class="button-row">
+        <button id="btn-tidy-storage" class="btn-secondary">Tidy up old folders</button>
       </div>
     </div>
 
-    <div class="data-section">
-      <h3>Saved routes</h3>
-      <ul id="saved-routes-list" class="data-list"></ul>
-    </div>
+
 
     <div class="data-section">
       <h3>Layer presets</h3>
@@ -522,6 +527,33 @@
 <script src="lib/leaflet/leaflet.js"></script>
 <script src="lib/leaflet/leaflet-rotate.js"></script>
 <script type="module" src="js/app.js"></script>
+<!-- Floating rather than modal: the whole point of the sliders is watching the
+     preview on the map, so a centred dialog with a dimmed backdrop would cover
+     the thing being adjusted. Draggable so it can be moved off whichever part
+     of the route matters. -->
+<div id="panel-trim-route" class="float-panel hidden">
+  <div class="float-panel-head">
+    <span class="float-panel-title">Trim route</span>
+    <span class="float-panel-hint">drag to move</span>
+  </div>
+  <label class="slider-row compact">
+    <span class="slider-label">Start</span>
+    <input type="range" id="trim-route-start" min="0" max="100" step="1" value="0" />
+    <output id="trim-route-start-out" class="slider-out">0</output>
+  </label>
+  <label class="slider-row compact">
+    <span class="slider-label">End</span>
+    <input type="range" id="trim-route-end" min="0" max="100" step="1" value="0" />
+    <output id="trim-route-end-out" class="slider-out">0</output>
+  </label>
+  <p class="float-panel-summary" id="trim-route-summary"></p>
+  <p class="float-panel-warning" id="trim-route-warning"></p>
+  <div class="float-panel-actions">
+    <button id="btn-trim-route-cancel" class="pill-btn pill-btn-ghost">Cancel</button>
+    <button id="btn-trim-route-save" class="pill-btn pill-btn-accent">Save</button>
+  </div>
+</div>
+
 <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
 </body>

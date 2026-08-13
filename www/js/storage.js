@@ -162,26 +162,76 @@ async function gatherAllData() {
   };
 }
 
-// Folder layout under the user's chosen directory. Each data type gets its own
-// folder so a shared file is obvious in a file manager, and so "send someone a
-// trail" never means handing over the whole database.
+// Folder layout under the user's chosen directory.
 //
 //   Datum/
-//     presets/   layer presets       (.datum-preset.json, Datum-only)
-//     flags/     waypoints           (.gpx)
-//     routes/    plotted trails      (.gpx)
-//     tracks/    recorded trails     (.gpx)
-//     sessions/  full snapshots      (.gpx, all three types in one document)
-//     backups/   whole-app JSON      (written only on explicit backup)
+//     current/                 the live, unsaved session
+//       waypoints/ routes/ tracks/
+//     sessions/<session-id>/   one folder per saved session
+//       waypoints/ routes/ tracks/
+//     presets/                 layer presets (.datum-preset.json, Datum only)
+//     exports/                 packaged single-file session exports (.gpx)
+//     backups/                 whole-app JSON
 //
+// Folder names use GPX's own vocabulary, so waypoints/ rather than flags/: a
+// Datum flag and a GPX <wpt> are the same record, and a folder name that
+// disagrees with the file contents helps nobody.
+export const RECORD_FOLDERS = ['waypoints', 'routes', 'tracks'];
+
 export const SHARE_FOLDERS = {
-  presets: 'presets',
-  flags: 'flags',
-  routes: 'routes',
-  tracks: 'tracks',
+  current: 'current',
   sessions: 'sessions',
+  presets: 'presets',
   backups: 'backups'
 };
+
+// Written by the earlier flat layout and no longer used. Records now live only
+// under current/ or a session folder, so these are stale duplicates rather
+// than a second home for anything. Listed so they can be found and cleaned up
+// deliberately, never deleted silently: they still contain real data.
+export const LEGACY_FOLDERS = ['flags', 'routes', 'tracks', 'exports'];
+
+// Counts what is left behind by the old layout, including loose .gpx files
+// sitting directly in sessions/ rather than inside a session folder.
+export async function findLegacyLeftovers() {
+  if (!CapFilesystem || !isStorageConfigured()) return { folders: [], looseSessionFiles: [], total: 0 };
+  const root = datumRoot();
+  const folders = [];
+  for (const name of LEGACY_FOLDERS) {
+    const count = await countFilesUnder(`${root}/${name}`);
+    if (count) folders.push({ name, count });
+  }
+  // A packaged session export used to be written straight into sessions/,
+  // where it sits confusingly beside the session folders themselves.
+  const looseSessionFiles = [];
+  for (const entry of await listDirEntries(`${root}/${SHARE_FOLDERS.sessions}`)) {
+    const name = entry.name || entry;
+    if ((entry.type || '') !== 'directory' && /\.gpx$/i.test(name)) looseSessionFiles.push(name);
+  }
+  const total = folders.reduce((n, f) => n + f.count, 0) + looseSessionFiles.length;
+  return { folders, looseSessionFiles, total };
+}
+
+export async function removeLegacyLeftovers() {
+  if (!CapFilesystem || !isStorageConfigured()) return 0;
+  const root = datumRoot();
+  let removed = 0;
+  for (const name of LEGACY_FOLDERS) {
+    const count = await countFilesUnder(`${root}/${name}`);
+    if (!count) continue;
+    await deleteTreeUnchecked(`${root}/${name}`);
+    removed += count;
+  }
+  for (const entry of await listDirEntries(`${root}/${SHARE_FOLDERS.sessions}`)) {
+    const name = entry.name || entry;
+    if ((entry.type || '') === 'directory' || !/\.gpx$/i.test(name)) continue;
+    try {
+      await CapFilesystem.deleteFile({ path: `${root}/${SHARE_FOLDERS.sessions}/${name}`, directory: getConfiguredDirectory() });
+      removed++;
+    } catch (e) { /* already gone */ }
+  }
+  return removed;
+}
 
 function shareDir(kind) {
   return `${backupDir(getConfiguredRelativePath())}/${SHARE_FOLDERS[kind]}`;
@@ -218,6 +268,188 @@ async function ensureDir(path) {
 // Freeform user text becomes a filename. Beyond path separators, Android's
 // FAT-derived external storage rejects several characters outright, and a name
 // that is empty after stripping would produce a hidden dotfile.
+// Session ids reach the filesystem as directory names, so they are validated
+// rather than trusted. This is the single gate every destructive path goes
+// through; see deleteSessionFolder for why that matters.
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{3,80}$/;
+export function isSafeSessionId(id) {
+  return typeof id === 'string' && SAFE_ID.test(id) && !id.includes('..');
+}
+
+// Sortable and readable: 20260811T134549-pusch-ridge. Sorts chronologically in
+// any file manager and says what it is without being opened. The slug comes
+// from the name at creation time and is never recomputed, because renaming
+// must not move a directory.
+export function makeSessionId(name) {
+  const ts = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '');
+  const slug = String(name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+  return slug ? `${ts}-${slug}` : ts;
+}
+
+function datumRoot() {
+  return backupDir(getConfiguredRelativePath());
+}
+export function currentDir() {
+  return `${datumRoot()}/${SHARE_FOLDERS.current}`;
+}
+export function sessionDir(id) {
+  if (!isSafeSessionId(id)) throw new Error(`Refusing to build a path from an unsafe session id: ${JSON.stringify(id)}`);
+  return `${datumRoot()}/${SHARE_FOLDERS.sessions}/${id}`;
+}
+
+// Creates the waypoints/routes/tracks trio inside a session or current folder.
+export async function ensureRecordFolders(baseDir) {
+  for (const f of RECORD_FOLDERS) await ensureDir(`${baseDir}/${f}`);
+}
+
+// ---------------------------------------------------------------------------
+// Deletion. Treat everything below as the highest-risk code in the app.
+// ---------------------------------------------------------------------------
+//
+// Deleting a session removes a directory tree from external storage, and a
+// session folder is frequently the only remaining copy of an old trip. The
+// failure that matters is not an error, it is a path that silently resolves
+// one level too high: if an id were ever empty or malformed, a naive join
+// would produce ".../sessions/" and take every session with it.
+//
+// Hence the id is validated against a strict pattern, the resolved path is
+// re-checked to sit strictly inside the sessions folder, and the delete
+// refuses rather than guessing. sessionDir() throws on a bad id before a path
+// is even built, so this is a second gate rather than the only one.
+
+async function listDirEntries(path) {
+  try {
+    const res = await CapFilesystem.readdir({ path, directory: getConfiguredDirectory() });
+    return res.files || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// Counts what a delete would remove, so a confirmation can state it rather
+// than asking the user to approve an unknown quantity.
+export async function countFilesUnder(path) {
+  if (!CapFilesystem || !isStorageConfigured()) return 0;
+  let total = 0;
+  for (const entry of await listDirEntries(path)) {
+    const name = entry.name || entry;
+    if ((entry.type || '') === 'directory') total += await countFilesUnder(`${path}/${name}`);
+    else total++;
+  }
+  return total;
+}
+
+async function deleteTreeUnchecked(path) {
+  for (const entry of await listDirEntries(path)) {
+    const name = entry.name || entry;
+    const child = `${path}/${name}`;
+    if ((entry.type || '') === 'directory') await deleteTreeUnchecked(child);
+    else {
+      try {
+        await CapFilesystem.deleteFile({ path: child, directory: getConfiguredDirectory() });
+      } catch (e) { /* already gone */ }
+    }
+  }
+  try {
+    await CapFilesystem.rmdir({ path, directory: getConfiguredDirectory(), recursive: true });
+  } catch (e) { /* already gone, or still non-empty because a child failed */ }
+}
+
+export async function deleteSessionFolder(id) {
+  if (!CapFilesystem || !isStorageConfigured()) return false;
+  // Gate one: the id itself. Never derived from a display name, which is
+  // freeform user text and could contain anything.
+  if (!isSafeSessionId(id)) {
+    throw new Error(`Refusing to delete: unsafe session id ${JSON.stringify(id)}`);
+  }
+  const root = `${datumRoot()}/${SHARE_FOLDERS.sessions}`;
+  const target = `${root}/${id}`;
+  // Gate two: the resolved path must sit strictly inside the sessions folder
+  // with a single non-empty final segment. This catches a malformed root as
+  // well as a malformed id.
+  const finalSegment = target.slice(root.length + 1);
+  if (!target.startsWith(`${root}/`) || !finalSegment || finalSegment.includes('/')) {
+    throw new Error(`Refusing to delete: "${target}" is not a single session folder`);
+  }
+  await deleteTreeUnchecked(target);
+  return true;
+}
+
+// Empties the live session folder without removing it. Deliberately a separate
+// function from the session delete path so the two cannot be confused at a
+// call site.
+export async function clearCurrentFolder() {
+  if (!CapFilesystem || !isStorageConfigured()) return;
+  const dir = currentDir();
+  for (const folder of RECORD_FOLDERS) await deleteTreeUnchecked(`${dir}/${folder}`);
+  await ensureRecordFolders(dir);
+}
+
+// Writes one record file into current/ or a session folder.
+export async function writeRecordFile(baseDir, folder, filename, text) {
+  if (!CapFilesystem || !isStorageConfigured()) return null;
+  await ensureDir(`${baseDir}/${folder}`);
+  await CapFilesystem.writeFile({
+    path: `${baseDir}/${folder}/${filename}`,
+    data: text,
+    directory: getConfiguredDirectory(),
+    encoding: 'utf8'
+  });
+  return filename;
+}
+
+export async function readRecordFile(baseDir, folder, filename) {
+  if (!CapFilesystem || !isStorageConfigured()) throw new Error('Storage folder is not configured.');
+  const res = await CapFilesystem.readFile({
+    path: `${baseDir}/${folder}/${filename}`, directory: getConfiguredDirectory(), encoding: 'utf8'
+  });
+  return res.data;
+}
+
+export async function listRecordFiles(baseDir, folder, extension) {
+  if (!CapFilesystem || !isStorageConfigured()) return [];
+  return (await listDirEntries(`${baseDir}/${folder}`))
+    .filter(e => (e.type || '') !== 'directory')
+    .map(e => e.name || e)
+    .filter(n => !extension || n.endsWith(extension))
+    .sort();
+}
+
+// The names of every saved session folder, used to find files to import.
+// Anything that is not a valid session id is skipped rather than trusted,
+// since these names feed straight back into path building.
+export async function listSessionFolders() {
+  if (!CapFilesystem || !isStorageConfigured()) return [];
+  return (await listDirEntries(`${datumRoot()}/${SHARE_FOLDERS.sessions}`))
+    .filter(e => (e.type || '') === 'directory')
+    .map(e => e.name || e)
+    .filter(isSafeSessionId);
+}
+
+// The packaged single-file export, written inside the session's own folder
+// rather than loose in sessions/ where it sat confusingly beside the folders.
+export async function writeSessionPackage(sessionDirPath, filename, text) {
+  if (!CapFilesystem || !isStorageConfigured()) return null;
+  await CapFilesystem.writeFile({
+    path: `${sessionDirPath}/${filename}`,
+    data: text,
+    directory: getConfiguredDirectory(),
+    encoding: 'utf8'
+  });
+  return filename;
+}
+
+export async function deleteRecordFile(baseDir, folder, filename) {
+  if (!CapFilesystem || !isStorageConfigured()) return;
+  try {
+    await CapFilesystem.deleteFile({ path: `${baseDir}/${folder}/${filename}`, directory: getConfiguredDirectory() });
+  } catch (e) { /* already gone */ }
+}
+
 export function safeFilename(name, extension) {
   const safe = String(name)
     .replace(/[\/\\:*?"<>|]/g, '-')

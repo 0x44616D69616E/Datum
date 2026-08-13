@@ -12,6 +12,7 @@ import { logInfo, logError, setDebugEnabled, isDebugEnabled } from './debugOverl
 import { mountIcons, ICONS, FLAG_TYPES } from './icons.js';
 import * as Storage from './storage.js';
 import * as Share from './share.js';
+import * as Mirror from './mirror.js';
 
 mountIcons();
 logInfo('app.js loaded and running');
@@ -25,6 +26,74 @@ const backdrop = document.getElementById('backdrop');
 // resolves (the await sits there forever) and the button handlers stay
 // attached to the shared dialog for the next caller to trip over.
 const dialogDismissHandlers = new Map();
+
+// Tree selection state. Declared here, above closeOverlay, and NOT down with
+// the rest of the tree code: closeOverlay clears the selection when the Data
+// sheet closes, and a `let` declared further down the file would still be in
+// its temporal dead zone if anything ever called closeOverlay during load. A
+// ReferenceError thrown from load-time code kills every remaining line of app
+// init, silently. Nothing calls it at load today; this makes that not matter.
+//
+// Only LEAF keys are stored. A folder's checkbox state is derived from its
+// leaves, which makes double-counting impossible: ticking a session and then
+// one of its waypoints cannot select the same record twice.
+const treeSelected = new Set();
+let treeSelectMode = false;
+
+// Makes a floating panel draggable by any part of it that is not a control.
+// Pointer events rather than touch or mouse events specifically, so one code
+// path covers finger, stylus and mouse.
+function makeDraggable(panel) {
+  let dragging = false;
+  let originX = 0, originY = 0, startLeft = 0, startTop = 0;
+
+  panel.addEventListener('pointerdown', (e) => {
+    // Controls keep their own behaviour. Without this, starting a drag on the
+    // slider thumb would fight the slider and neither would work properly.
+    if (e.target.closest('input, button, output, select, textarea, a')) return;
+    const rect = panel.getBoundingClientRect();
+    // The panel is first placed with a translateX(-50%) to centre it. Dragging
+    // works in absolute left/top, so the transform is dropped here and the
+    // measured position adopted instead; leaving it would offset every
+    // subsequent position by half the panel width.
+    panel.style.transform = 'none';
+    panel.style.left = `${rect.left}px`;
+    panel.style.top = `${rect.top}px`;
+    dragging = true;
+    originX = e.clientX; originY = e.clientY;
+    startLeft = rect.left; startTop = rect.top;
+    panel.classList.add('is-dragging');
+    // Capture so the drag survives the pointer leaving the panel, which it
+    // will as soon as the panel starts moving out from under the finger.
+    panel.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  panel.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const rect = panel.getBoundingClientRect();
+    // Clamped so the panel can never be dragged fully off screen, which would
+    // leave no way to reach its buttons again.
+    const margin = 24;
+    const maxLeft = window.innerWidth - margin;
+    const maxTop = window.innerHeight - margin;
+    const left = Math.min(maxLeft, Math.max(margin - rect.width, startLeft + (e.clientX - originX)));
+    const top = Math.min(maxTop, Math.max(0, startTop + (e.clientY - originY)));
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+    panel.style.right = 'auto';
+    panel.style.bottom = 'auto';
+  });
+
+  const end = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    panel.classList.remove('is-dragging');
+    try { panel.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
+  };
+  panel.addEventListener('pointerup', end);
+  panel.addEventListener('pointercancel', end);
+}
 
 // Transient notice for things that happen without the user asking. Deliberately
 // not a dialog: these are informational, and a modal would interrupt whatever
@@ -81,6 +150,9 @@ function openDialog(id) {
 function closeOverlay(id) {
   document.getElementById(id).classList.add('hidden');
   dialogDismissHandlers.delete(id);
+  // A selection that survives the sheet closing is how someone deletes
+  // something they ticked ten minutes ago and forgot about.
+  if (id === 'sheet-data' && typeof resetTreeSelection === 'function') resetTreeSelection();
   // The backdrop is shared, so it can only be torn down once nothing is left
   // sitting on top of it. Closing a dialog over an open sheet used to strip
   // the dimming out from under the sheet that was still showing.
@@ -1261,86 +1333,123 @@ document.getElementById('btn-load-presets-from-folder').onclick = async () => {
   logInfo(`Preset import: ${parts.join(' ')}`);
 };
 
+// ---------- Filesystem mirror ----------
+Mirror.startMirroring();
+
+// A loaded session is live, not frozen: edits made while it is active belong
+// to it. Re-snapshotting on every single change would rewrite every record's
+// copy on each keystroke, so it is debounced and coalesced. The delay is short
+// enough that closing the app shortly after an edit still captures it.
+let sessionSyncTimer = null;
+Store.onDataChange(() => {
+  if (!currentSessionId) return;
+  if (sessionSyncTimer) clearTimeout(sessionSyncTimer);
+  sessionSyncTimer = setTimeout(async () => {
+    sessionSyncTimer = null;
+    try {
+      await Store.updateSession(currentSessionId);
+    } catch (e) {
+      logError(`Could not update session snapshot: ${e.message}`);
+    }
+  }, 1500);
+});
+
 // ---------- Sharing: GPX export/import ----------
 // Reads the privacy controls fresh on each export rather than caching them, so
 // a change in the sheet applies to the very next export with no apply step.
+// Sliders work in whole metres internally and display in the user's chosen
+// units, so the stored value never drifts through a rounding trip and the
+// label always matches the rest of the app.
+const TRIM_MAX_METRES = 1000;
+
+function trimLabel(metres) {
+  if (useMetric) return `${metres} m`;
+  return `${Math.round(metres * 3.280839895)} ft`;
+}
+
+function syncTrimUI() {
+  const on = document.getElementById('share-trim-enabled').checked;
+  const box = document.getElementById('share-trim-controls');
+  box.classList.toggle('is-disabled', !on);
+  for (const which of ['start', 'end']) {
+    const slider = document.getElementById(`share-trim-${which}`);
+    slider.disabled = !on;
+    document.getElementById(`share-trim-${which}-out`).textContent = trimLabel(+slider.value);
+  }
+}
+
+document.getElementById('share-trim-enabled').onchange = syncTrimUI;
+for (const which of ['start', 'end']) {
+  document.getElementById(`share-trim-${which}`).addEventListener('input', syncTrimUI);
+}
+syncTrimUI();
+
+// Read fresh on each use rather than cached, so a change applies to the very
+// next action with no apply step.
 function currentShareOptions() {
+  const trimOn = document.getElementById('share-trim-enabled').checked;
   return {
     includeTimestamps: document.getElementById('share-include-timestamps').checked,
-    trimEndsMetres: +document.getElementById('share-trim-ends').value || 0,
-    includeDatumExtensions: document.getElementById('share-include-extensions').checked,
-    includeBoundFlags: document.getElementById('share-include-bound-flags').checked
+    trimStartMetres: trimOn ? +document.getElementById('share-trim-start').value || 0 : 0,
+    trimEndMetres: trimOn ? +document.getElementById('share-trim-end').value || 0 : 0
   };
 }
 
-document.getElementById('btn-export-all-share').onclick = async () => {
-  // No configured-storage precondition any more. ensureStorageRoot() below
-  // creates Documents/Datum on demand, so a first export works without
-  // having visited Settings.
-  const opts = currentShareOptions();
+document.getElementById('btn-package-session').onclick = async () => {
+  if (!currentSessionId) {
+    await showAlert('Save the session first',
+      'Packaging writes one file containing a whole session, so the session needs a name and a folder to live in. Use "Save session" first.');
+    return;
+  }
   try {
-    // The folder can be deleted from a file manager at any time, which leaves
-    // the app still configured but pointing at nothing. Rebuilding here means
-    // export recovers by itself instead of writing into a void.
-    if (await Storage.ensureStorageRoot()) {
-      logInfo('Storage folder was missing and has been recreated.');
-    }
-    const [waypoints, routes, tracks, sessions] = await Promise.all([
-      Store.getWaypoints(), Store.getRoutes(), Store.getTracks(), Store.getSessions()
-    ]);
-    let count = 0;
-    let skipped = 0;
-    const failures = [];
+    await Storage.ensureStorageRoot();
+    // The mirror writes per record as you go, so a queued write could still be
+    // in flight. Flushing first means the package cannot miss a record that
+    // was added a moment ago.
+    await Mirror.flushMirror();
+    const sessions = await Store.getSessions();
+    const session = sessions.find(x => x.id === currentSessionId);
+    if (!session) { await showAlert('Session not found', 'Could not find the saved session to package.'); return; }
 
-    // Each write is caught individually. Previously one try wrapped the whole
-    // loop, so a single failure abandoned every remaining item while the
-    // summary still reported success for a count that had stopped rising.
-    // One unwritable record should not cost the other forty.
-    const write = async (label, fn) => {
-      try {
-        const written = await fn();
-        if (written) count++;
-        // A null return means storage is not configured. That is a skip
-        // rather than a failure, but it must still be visible: it is exactly
-        // the case that produced "exported" with nothing on disk.
-        else skipped++;
-      } catch (e) {
-        failures.push(`${label}: ${e.message}`);
-      }
-    };
-
-    for (const wp of waypoints) await write(wp.name || 'Unnamed flag', () => Share.exportFlag(wp, opts));
-    for (const r of routes) await write(r.name || 'Unnamed route', () => Share.exportRoute(r, opts));
-    for (const t of tracks) await write(t.name || 'Unnamed track', () => Share.exportTrack(t, opts));
-    for (const s of sessions) await write(s.name || 'Unnamed session', () => Share.exportSession(s, opts));
-
+    const opts = currentShareOptions();
+    const filename = await Share.exportSessionPackage(session, opts);
     const notes = [];
     if (!opts.includeTimestamps) notes.push('Times were stripped.');
-    if (opts.trimEndsMetres) notes.push(`${opts.trimEndsMetres} m trimmed from each end of tracks.`);
-    if (!opts.includeDatumExtensions) notes.push('Datum extras left out, so flag icons and route bindings will not survive a re-import.');
-    if (!opts.includeBoundFlags) notes.push('Route files contain only the route line.');
+    if (opts.trimStartMetres) notes.push(`${trimLabel(opts.trimStartMetres)} trimmed from the start of tracks.`);
+    if (opts.trimEndMetres) notes.push(`${trimLabel(opts.trimEndMetres)} trimmed from the end of tracks.`);
+    await showAlert('Session packaged',
+      `Written to ${Storage.getConfiguredPathLabel()}/sessions/${currentSessionId}/${filename}.${notes.length ? '\n\n' + notes.join(' ') : ''}`);
+    logInfo(`Session packaged: ${filename}`);
+  } catch (e) {
+    logError(`Packaging failed: ${e.message}`);
+    await showAlert('Packaging failed', e.message);
+  }
+};
 
-    if (!count && (failures.length || skipped)) {
-      // Nothing reached disk, so this is a failure and must not be phrased as
-      // a success with a footnote.
-      await showAlert('Export failed',
-        `Nothing was written.\n\n${failures.length ? failures.slice(0, 3).join('\n') : 'The storage folder is not available. Open Settings and set it up again.'}`);
-      logError(`GPX export wrote nothing. ${failures.length} failure(s), ${skipped} skipped.`);
+// The earlier flat layout wrote records into Datum/flags, Datum/routes and
+// Datum/tracks, and dropped packaged exports loose in sessions/. Nothing
+// writes there any more, but the files are real data and are not deleted
+// without asking.
+document.getElementById('btn-tidy-storage').onclick = async () => {
+  try {
+    await Storage.ensureStorageRoot();
+    const found = await Storage.findLegacyLeftovers();
+    if (!found.total) {
+      await showAlert('Nothing to tidy', 'Your storage folder is already using the current layout.');
       return;
     }
-
-    const problems = [];
-    if (failures.length) problems.push(`${failures.length} item(s) could not be written:\n${failures.slice(0, 3).join('\n')}${failures.length > 3 ? `\n...and ${failures.length - 3} more` : ''}`);
-    if (skipped) problems.push(`${skipped} item(s) skipped because the storage folder was unavailable.`);
-
-    await showAlert(failures.length || skipped ? 'Exported with problems' : 'Exported',
-      `${count} file(s) written to ${Storage.getConfiguredPathLabel()}, sorted into flags, routes, tracks and sessions.`
-      + `${notes.length ? '\n\n' + notes.join(' ') : ''}`
-      + `${problems.length ? '\n\n' + problems.join('\n\n') : ''}`);
-    logInfo(`GPX export: ${count} file(s), ${failures.length} failure(s), ${skipped} skipped. ${notes.join(' ')}`);
+    const bits = found.folders.map(f => `${f.name}/ (${f.count} file(s))`);
+    if (found.looseSessionFiles.length) bits.push(`${found.looseSessionFiles.length} loose file(s) in sessions/`);
+    const ok = await askConfirm('Tidy up old folders?',
+      `These are left over from an earlier layout and nothing writes to them now:\n\n${bits.join('\n')}\n\n`
+      + 'Your waypoints, routes and tracks already live in current/ and your session folders, so these are duplicates. Delete them?');
+    if (!ok) return;
+    const removed = await Storage.removeLegacyLeftovers();
+    await showAlert('Tidied up', `${removed} file(s) removed.`);
+    logInfo(`Storage tidy: ${removed} legacy file(s) removed.`);
   } catch (e) {
-    logError(`Export failed: ${e.message}`);
-    await showAlert('Export failed', e.message);
+    logError(`Tidy failed: ${e.message}`);
+    await showAlert('Tidy failed', e.message);
   }
 };
 
@@ -1371,7 +1480,7 @@ document.getElementById('btn-import-share').onclick = async () => {
       // No collisions, so there is nothing to ask about, but import still
       // writes to the database and should not happen on a single stray tap.
       const go = await askConfirm('Import from folder?',
-        'Every GPX file in your flags, routes, tracks and sessions folders will be read. Nothing you already have will be changed.');
+        'Every GPX file in current/ and your session folders will be read. Files Datum wrote itself are recognised and skipped, so nothing is duplicated and nothing you already have is changed.');
       if (!go) return;
     }
 
@@ -1445,7 +1554,9 @@ async function handleIncomingGpx(uri, source) {
     let adopted = null;
     try {
       await Storage.ensureStorageRoot();
-      const kind = Share.folderForParsed(parsed);
+      // Adopted into the live session, since an incoming file is something you
+      // are adding to what you are working on now.
+      const folder = Share.folderForParsed(parsed);
       // A content:// URI usually ends in an opaque row id, so the last path
       // segment would save the file as something like "1000000042.gpx".
       // Falling back to the name of what is actually inside gives a file
@@ -1454,7 +1565,7 @@ async function handleIncomingGpx(uri, source) {
       const looksUseful = fromUri && !/^\d+$/.test(fromUri) && !/^[0-9a-f-]{16,}$/i.test(fromUri);
       const fromContent = (parsed.routes[0] || parsed.tracks[0] || parsed.waypoints[0] || {}).name;
       const base = looksUseful ? fromUri : (fromContent || 'imported');
-      adopted = await Storage.adoptExternalFile(kind, Storage.safeFilename(base, '.gpx'), text);
+      adopted = await Storage.writeRecordFile(Storage.currentDir(), folder, Storage.safeFilename(base, '.gpx'), text);
     } catch (e) {
       logError(`Imported, but could not copy the file into Datum's folder: ${e.message}`);
     }
@@ -2766,7 +2877,7 @@ async function redrawAllDataFromStore() {
       // so it has no live handler until the popup actually opens - wired
       // below via the popupopen event on each layer, which is the standard
       // way to attach behavior to interactive popup content in Leaflet.
-      const popupHtml = `<b>${r.name}</b><br>${GPS.formatDistance(dist, useMetric)}<br><button type="button" class="pill-btn route-popup-more">More</button> <button type="button" class="pill-btn pill-btn-danger route-popup-delete">Delete</button>`;
+      const popupHtml = `<b>${r.name}</b><br>${GPS.formatDistance(dist, useMetric)}<br><button type="button" class="pill-btn route-popup-more">More</button> <button type="button" class="pill-btn route-popup-trim">Trim</button> <button type="button" class="pill-btn pill-btn-danger route-popup-delete">Delete</button>`;
       // A visible thin line plus an invisible wide one underneath sharing
       // the same popup - the thin line matches the line's real weight
       // visually, but taps register over a much wider margin around it
@@ -2784,6 +2895,10 @@ async function redrawAllDataFromStore() {
           if (!el) return;
           const moreBtn = el.querySelector('.route-popup-more');
           if (moreBtn) moreBtn.onclick = () => { map.closePopup(); openRouteDetailsSheet(r); };
+          const trimBtn = el.querySelector('.route-popup-trim');
+          // Popup closed first: the trim dialog draws a preview on the map and
+          // refits the view, which an open popup would sit on top of.
+          if (trimBtn) trimBtn.onclick = () => { map.closePopup(); openTrimRouteDialog(r); };
           const delBtn = el.querySelector('.route-popup-delete');
           if (delBtn) delBtn.onclick = async () => {
             // Popup closed before the prompt so a Leaflet popup and a modal
@@ -3832,84 +3947,566 @@ document.getElementById('btn-delete-all-maps-download').onclick = deleteAllMapDa
 
 // ---------- Sessions & Data sheet ----------
 let currentSessionName = null;
+// Null while the working data is unsaved, in which case the mirror writes to
+// current/. Set once a session is saved or loaded, which is also its folder
+// name on disk.
+let currentSessionId = null;
 
 async function renderDataPanel() {
   document.getElementById('current-session-label').textContent = currentSessionName || 'Unsaved';
   renderLayerPresetsList();
 
-  try {
-    const sessions = await Store.getSessions();
-    const sessionsList = document.getElementById('saved-sessions-list');
-    sessionsList.innerHTML = '';
-    sessions.forEach((s) => {
-      const li = document.createElement('li');
-      li.innerHTML = `<span>${s.name}<br><small>${new Date(s.savedAt).toLocaleString()} · ${s.waypoints.length} flags, ${s.routes.length} routes, ${s.tracks.length} tracks</small></span>`;
-      const actions = document.createElement('span');
-      actions.className = 'item-actions';
-      const loadBtn = document.createElement('button');
-      loadBtn.textContent = 'Load';
-      loadBtn.onclick = () => loadSessionFlow(s);
-      const delBtn = document.createElement('button');
-      delBtn.textContent = 'Delete';
-      delBtn.className = 'danger';
-      delBtn.onclick = async () => {
-        const ok = await askConfirm('Delete session?', `Delete saved session "${s.name}"? This can't be undone.`);
-        if (ok) { await Store.deleteSession(s.id); logInfo(`Session "${s.name}" deleted.`); renderDataPanel(); }
-      };
-      actions.appendChild(loadBtn);
-      actions.appendChild(delBtn);
-      li.appendChild(actions);
-      sessionsList.appendChild(li);
-    });
-  } catch (e) {
-    logError(`Failed to list sessions: ${e.message}`);
-  }
-
-  try {
-    const routes = await Store.getRoutes();
-    const routesList = document.getElementById('saved-routes-list');
-    routesList.innerHTML = '';
-    routes.forEach((r) => {
-      let dist = 0;
-      for (let i = 1; i < r.points.length; i++) dist += GPS.distanceMiles(r.points[i - 1], r.points[i]);
-      const li = document.createElement('li');
-      li.innerHTML = `<span>${r.name}<br><small>${GPS.formatDistance(dist, useMetric)}, ${r.points.length} points</small></span>`;
-      const actions = document.createElement('span');
-      actions.className = 'item-actions';
-      const loadBtn = document.createElement('button');
-      loadBtn.textContent = 'Load';
-      loadBtn.onclick = () => {
-        map.fitBounds(r.points.map(p => [p.lat, p.lng]));
-        startRoutePlanning(r.points, r.id);
-        closeOverlay('sheet-data');
-        logInfo(`Loaded route "${r.name}" for editing - tap to add more points, or Finish to re-save.`);
-      };
-      const delBtn = document.createElement('button');
-      delBtn.textContent = 'Delete';
-      delBtn.className = 'danger';
-      delBtn.onclick = async () => {
-        const ok = await askConfirm('Delete route?', `Delete saved route "${r.name}"?`);
-        if (ok) { await unbindFlagsFromRoute(r.id); await Store.deleteRoute(r.id); if (nearbyRouteForSuggestion && nearbyRouteForSuggestion.route.id === r.id) hideNavSuggestion(); logInfo(`Route "${r.name}" deleted.`); await redrawAllDataFromStore(); renderDataPanel(); }
-      };
-      actions.appendChild(loadBtn);
-      actions.appendChild(delBtn);
-      li.appendChild(actions);
-      routesList.appendChild(li);
-    });
-  } catch (e) {
-    logError(`Failed to list routes: ${e.message}`);
-  }
+  await renderSessionTree();
 
   renderRegionsList('saved-map-regions-list', 'tile-cache-stats');
+}
+
+
+
+
+// ---------- Route trimming ----------
+// Shortens a saved route from either end. Distinct from the export trim, which
+// only affects the file being written: this edits the stored route itself.
+//
+// A live preview is drawn while the sliders move, because sliders alone make
+// this guesswork: "300 m from the start" means nothing without seeing which
+// part of the line it removes.
+
+let trimPreviewLine = null;
+let trimContext = null;
+
+function cumulativeMiles(points) {
+  const out = [0];
+  for (let i = 1; i < points.length; i++) out.push(out[i - 1] + GPS.distanceMiles(points[i - 1], points[i]));
+  return out;
+}
+
+// Points remaining after removing startM from the front and endM from the
+// back, measured along the path.
+function slicedRoutePoints(points, cum, startM, endM) {
+  const totalM = cum[cum.length - 1] * 1609.344;
+  const fromM = Math.min(startM, totalM);
+  const toM = Math.max(fromM, totalM - endM);
+  let a = 0;
+  while (a < points.length - 1 && cum[a] * 1609.344 < fromM) a++;
+  let b = points.length - 1;
+  while (b > a && cum[b] * 1609.344 > toM) b--;
+  // A route needs two points to be a line at all, so the slice never returns
+  // fewer; the dialog blocks saving in that case rather than silently keeping
+  // more than the sliders show.
+  if (b - a < 1) return points.slice(a, a + 2).length === 2 ? points.slice(a, a + 2) : points.slice(0, 2);
+  return points.slice(a, b + 1);
+}
+
+function clearTrimPreview() {
+  if (trimPreviewLine) { map.removeLayer(trimPreviewLine); trimPreviewLine = null; }
+}
+
+function renderTrimPreview() {
+  if (!trimContext) return;
+  const { route, cum } = trimContext;
+  const startM = +document.getElementById('trim-route-start').value || 0;
+  const endM = +document.getElementById('trim-route-end').value || 0;
+  const kept = slicedRoutePoints(route.points, cum, startM, endM);
+
+  clearTrimPreview();
+  trimPreviewLine = L.polyline(kept.map(p => [p.lat, p.lng]), {
+    color: '#f5c542', weight: 6, opacity: 0.95
+  }).addTo(map);
+
+  const keptMiles = cumulativeMiles(kept).pop() || 0;
+  document.getElementById('trim-route-start-out').textContent = trimLabel(startM);
+  document.getElementById('trim-route-end-out').textContent = trimLabel(endM);
+  document.getElementById('trim-route-summary').textContent =
+    `${GPS.formatDistance(keptMiles, useMetric)} of ${GPS.formatDistance(trimContext.totalMiles, useMetric)} kept, ${kept.length} of ${route.points.length} points.`;
+
+  // Bound flags are the non-obvious casualty of a trim: their distance along
+  // the route shifts, and any that sat on a removed section are no longer on
+  // the route at all. Said up front rather than discovered afterwards.
+  const affected = trimContext.boundFlags.filter(f => {
+    const d = f.routeDistance;
+    if (typeof d !== 'number') return false;
+    return d * 1609.344 < startM || d * 1609.344 > (trimContext.totalMiles * 1609.344 - endM);
+  }).length;
+  const warn = document.getElementById('trim-route-warning');
+  warn.textContent = kept.length < 2
+    ? 'A route needs at least two points.'
+    : affected
+      ? `${affected} bound flag(s) fall outside the trimmed route and will be unbound.`
+      : '';
+  document.getElementById('btn-trim-route-save').disabled = kept.length < 2;
+}
+
+async function openTrimRouteDialog(route) {
+  const points = route.points || [];
+  if (points.length < 3) {
+    await showAlert('Too short to trim', 'This route needs more than two points before it can be trimmed.');
+    return;
+  }
+  const cum = cumulativeMiles(points);
+  const totalMiles = cum[cum.length - 1];
+  const totalMetres = Math.floor(totalMiles * 1609.344);
+  const allFlags = await Store.getWaypoints();
+
+  trimContext = {
+    route, cum, totalMiles,
+    boundFlags: allFlags.filter(w => w.boundRouteId === route.id)
+  };
+
+  for (const which of ['start', 'end']) {
+    const el = document.getElementById(`trim-route-${which}`);
+    // Capped below the full length so the two sliders cannot between them
+    // consume the entire route.
+    el.max = Math.max(1, Math.floor(totalMetres * 0.45));
+    el.step = Math.max(1, Math.round(totalMetres / 200));
+    el.value = 0;
+    el.oninput = renderTrimPreview;
+  }
+
+  map.fitBounds(points.map(p => [p.lat, p.lng]));
+  renderTrimPreview();
+
+  // Deliberately NOT openDialog: that dims the map behind a backdrop, and the
+  // map is exactly what needs to stay visible here. Same reasoning as the
+  // navigation route picker, which bypasses the overlay system for the same
+  // reason.
+  const panel = document.getElementById('panel-trim-route');
+  // Placed low on the first open so it sits clear of the route, which the
+  // fitBounds above has just centred. Position persists across opens once the
+  // user has moved it, since they moved it somewhere for a reason.
+  if (!panel.style.top) {
+    panel.style.left = '50%';
+    panel.style.top = `${Math.max(80, window.innerHeight - 260)}px`;
+    panel.style.transform = 'translateX(-50%)';
+  }
+  panel.classList.remove('hidden');
+  if (!panel.dataset.draggable) {
+    makeDraggable(panel);
+    // Wired once. Re-registering on every open would stack duplicate handlers
+    // and make the panel move several times the drag distance.
+    panel.dataset.draggable = 'true';
+  }
+}
+
+function closeTrimRouteDialog() {
+  clearTrimPreview();
+  trimContext = null;
+  document.getElementById('panel-trim-route').classList.add('hidden');
+}
+
+document.getElementById('btn-trim-route-cancel').onclick = closeTrimRouteDialog;
+
+document.getElementById('btn-trim-route-save').onclick = async () => {
+  if (!trimContext) return closeTrimRouteDialog();
+  const { route, cum } = trimContext;
+  const startM = +document.getElementById('trim-route-start').value || 0;
+  const endM = +document.getElementById('trim-route-end').value || 0;
+  if (!startM && !endM) return closeTrimRouteDialog();
+
+  const kept = slicedRoutePoints(route.points, cum, startM, endM);
+  if (kept.length < 2) return;
+
+  const ok = await askConfirm('Trim this route?',
+    `The route will be shortened to ${GPS.formatDistance(cumulativeMiles(kept).pop() || 0, useMetric)}. The removed sections can't be recovered.`);
+  if (!ok) return;
+
+  try {
+    await Store.saveRoute({ ...route, points: kept });
+
+    // Every bound flag's distance along the route is measured from the old
+    // start, so all of them are stale after a trim, not just the ones on a
+    // removed section. Re-projecting is the only way the numbers stay
+    // meaningful, and anything now too far from the line is unbound.
+    let rebound = 0, unbound = 0;
+    for (const wp of trimContext.boundFlags) {
+      const proj = GPS.projectOntoRoute(wp, kept);
+      if (proj && proj.offRouteMiles * 1609.344 <= 60) {
+        wp.routeDistance = proj.distanceAlongRouteMiles;
+        await Store.saveWaypoint(wp);
+        rebound++;
+      } else {
+        wp.boundRouteId = null;
+        wp.routeDistance = null;
+        await Store.saveWaypoint(wp);
+        unbound++;
+      }
+    }
+
+    closeTrimRouteDialog();
+    await redrawAllDataFromStore();
+    renderDataPanel();
+    const extra = unbound ? ` ${unbound} flag(s) unbound, ${rebound} kept.` : '';
+    logInfo(`Route "${route.name}" trimmed to ${kept.length} points.${extra}`);
+    showToast(`Route trimmed.${extra}`);
+  } catch (e) {
+    logError(`Could not trim route: ${e.message}`);
+    await showAlert('Trim failed', e.message);
+  }
+};
+
+// ---------- Session tree ----------
+// Built entirely from the database, never from the filesystem. The mirror can
+// be stale or unavailable and the tree still renders correctly, which is the
+// whole point of keeping IndexedDB authoritative.
+
+const RECORD_GROUPS = ['waypoints', 'routes', 'tracks'];
+const treeExpanded = new Set(['current']);
+
+const leafKey = (ownerKey, group, id) => `${ownerKey}/${group}/${id}`;
+
+async function buildTreeModel() {
+  const [waypoints, routes, tracks, sessions] = await Promise.all([
+    Store.getWaypoints(), Store.getRoutes(), Store.getTracks(), Store.getSessions()
+  ]);
+  const nodes = [{
+    key: 'current',
+    label: currentSessionName || 'Current session',
+    sub: currentSessionId ? 'Loaded' : 'Unsaved',
+    sessionId: currentSessionId,
+    isCurrent: true,
+    groups: { waypoints, routes, tracks }
+  }];
+  for (const sess of sessions) {
+    // The loaded session already appears as the live one at the top; listing
+    // its stored snapshot again would show the same session twice, with
+    // whichever copy is staler looking like a separate thing.
+    if (sess.id === currentSessionId) continue;
+    nodes.push({
+      key: `session:${sess.id}`,
+      label: sess.name,
+      sub: new Date(sess.savedAt).toLocaleDateString(),
+      sessionId: sess.id,
+      isCurrent: false,
+      groups: {
+        waypoints: sess.waypoints || [], routes: sess.routes || [], tracks: sess.tracks || []
+      }
+    });
+  }
+  return nodes;
+}
+
+function leavesOf(node, group) {
+  if (group) return (node.groups[group] || []).map(r => leafKey(node.key, group, r.id));
+  return RECORD_GROUPS.flatMap(g => leavesOf(node, g));
+}
+
+// unchecked | indeterminate | checked, derived rather than stored.
+function checkStateOf(keys) {
+  if (!keys.length) return 'unchecked';
+  const n = keys.filter(k => treeSelected.has(k)).length;
+  return n === 0 ? 'unchecked' : n === keys.length ? 'checked' : 'indeterminate';
+}
+
+function setSelection(keys, on) {
+  for (const k of keys) { if (on) treeSelected.add(k); else treeSelected.delete(k); }
+}
+
+function makeCheckbox(keys, onToggle) {
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.className = 'tree-check';
+  const state = checkStateOf(keys);
+  cb.checked = state === 'checked';
+  cb.indeterminate = state === 'indeterminate';
+  cb.onclick = (e) => {
+    e.stopPropagation();
+    // Indeterminate counts as "not all selected", so the tap selects the rest
+    // rather than clearing what is already ticked.
+    setSelection(keys, checkStateOf(keys) !== 'checked');
+    onToggle();
+  };
+  return cb;
+}
+
+function treeRow({ depth, expandable, isFolder, expanded, label, sub, count, keys, active, action, onToggleExpand, onRerender }) {
+  const li = document.createElement('li');
+  const row = document.createElement('div');
+  row.className = `tree-row depth-${depth}${active ? ' is-active' : ''}`;
+
+  const twisty = document.createElement('span');
+  twisty.className = `tree-twisty${expandable ? '' : ' leaf'}`;
+  twisty.textContent = expanded ? '\u25be' : '\u25b8';
+  row.appendChild(twisty);
+
+  if (treeSelectMode && keys && keys.length) row.appendChild(makeCheckbox(keys, onRerender));
+
+  // Folder or file glyph, so depth is readable without counting indentation.
+  // Keyed on what the row IS, not on whether it can be opened: an empty
+  // tracks group is still a folder, and drawing it as a file made it look
+  // like a record that happened to be called "tracks".
+  const icon = document.createElement('span');
+  icon.className = 'tree-icon';
+  icon.innerHTML = ICONS[isFolder ? 'folder' : 'file'] || '';
+  row.appendChild(icon);
+
+  const labelEl = document.createElement('span');
+  labelEl.className = 'tree-label';
+  const nameEl = document.createElement('span');
+  nameEl.className = 'tree-name';
+  nameEl.textContent = label;
+  labelEl.appendChild(nameEl);
+  if (sub) {
+    const small = document.createElement('small');
+    small.textContent = sub;
+    labelEl.appendChild(small);
+  }
+  row.appendChild(labelEl);
+
+  if (typeof count === 'number') {
+    const c = document.createElement('span');
+    c.className = 'tree-count';
+    c.textContent = String(count);
+    row.appendChild(c);
+  }
+
+  // Actions are explicit buttons rather than a row tap, because the row tap is
+  // already expand/collapse and the two would fight. Hidden during select mode
+  // so a mis-tap while ticking boxes cannot load a session over your work.
+  if (action && !treeSelectMode) {
+    const btn = document.createElement('button');
+    btn.textContent = action.label;
+    btn.className = 'tree-action';
+    btn.onclick = (e) => { e.stopPropagation(); action.run(); };
+    row.appendChild(btn);
+  }
+
+  if (expandable) row.onclick = onToggleExpand;
+  li.appendChild(row);
+  return li;
+}
+
+function describeRecord(group, rec) {
+  if (group === 'routes' && rec.points) {
+    let d = 0;
+    for (let i = 1; i < rec.points.length; i++) d += GPS.distanceMiles(rec.points[i - 1], rec.points[i]);
+    return `${GPS.formatDistance(d, useMetric)}, ${rec.points.length} points`;
+  }
+  if (group === 'tracks' && rec.points) return `${rec.points.length} points`;
+  if (group === 'waypoints' && rec.boundRouteId) return 'Bound to a route';
+  return '';
+}
+
+function recordAction(group, rec) {
+  if (group === 'routes') {
+    return { label: 'Edit', run: () => {
+      map.fitBounds(rec.points.map(p => [p.lat, p.lng]));
+      startRoutePlanning(rec.points, rec.id);
+      closeOverlay('sheet-data');
+      logInfo(`Loaded route "${rec.name}" for editing - tap to add more points, or Finish to re-save.`);
+    } };
+  }
+  if (group === 'waypoints') {
+    return { label: 'Show', run: () => { map.panTo([rec.lat, rec.lng]); closeOverlay('sheet-data'); } };
+  }
+  if (group === 'tracks' && rec.points && rec.points.length) {
+    return { label: 'Show', run: () => { map.fitBounds(rec.points.map(p => [p.lat, p.lng])); closeOverlay('sheet-data'); } };
+  }
+  return null;
+}
+
+async function renderSessionTree() {
+  const root = document.getElementById('session-tree');
+  if (!root) return;
+  const rerender = () => { renderSessionTree(); };
+
+  // The model is read BEFORE the list is touched, and rows are built into a
+  // detached fragment that replaces the old contents in one operation. The
+  // previous order (clear, then await the database) left the list visibly
+  // empty for the length of the read, which is the flicker seen on every
+  // expand and on entering or leaving select mode.
+  let nodes;
+  try {
+    nodes = await buildTreeModel();
+  } catch (e) {
+    logError(`Failed to build session list: ${e.message}`);
+    return;
+  }
+  const frag = document.createDocumentFragment();
+
+  for (const node of nodes) {
+    const nodeLeaves = leavesOf(node);
+    const total = nodeLeaves.length;
+    const expanded = treeExpanded.has(node.key);
+    frag.appendChild(treeRow({
+      depth: 0, expandable: true, isFolder: true, expanded,
+      label: node.label, sub: node.sub, count: total,
+      keys: nodeLeaves, active: node.isCurrent,
+      action: node.isCurrent ? null : { label: 'Load', run: () => loadSessionFlow({ id: node.sessionId, name: node.label }) },
+      onToggleExpand: () => {
+        if (expanded) treeExpanded.delete(node.key); else treeExpanded.add(node.key);
+        rerender();
+      },
+      onRerender: rerender
+    }));
+    if (!expanded) continue;
+
+    for (const group of RECORD_GROUPS) {
+      const records = node.groups[group] || [];
+      const groupKey = `${node.key}/${group}`;
+      const groupExpanded = treeExpanded.has(groupKey);
+      const groupLeaves = leavesOf(node, group);
+      frag.appendChild(treeRow({
+        depth: 1, expandable: records.length > 0, isFolder: true, expanded: groupExpanded,
+        label: group, count: records.length, keys: groupLeaves,
+        onToggleExpand: () => {
+          if (groupExpanded) treeExpanded.delete(groupKey); else treeExpanded.add(groupKey);
+          rerender();
+        },
+        onRerender: rerender
+      }));
+      if (!groupExpanded) continue;
+      for (const rec of records) {
+        frag.appendChild(treeRow({
+          depth: 2, expandable: false, isFolder: false, expanded: false,
+          label: rec.name || '(unnamed)',
+          sub: describeRecord(group, rec),
+          keys: [leafKey(node.key, group, rec.id)],
+          // Only live records are actionable. Editing a route inside a
+          // session that is not loaded would mean silently loading it first,
+          // which is too much to happen from one tap.
+          action: node.isCurrent ? recordAction(group, rec) : null,
+          onRerender: rerender
+        }));
+      }
+    }
+  }
+
+  if (!nodes.length) {
+    const li = document.createElement('li');
+    li.className = 'tree-empty';
+    li.textContent = 'No sessions yet.';
+    frag.appendChild(li);
+  }
+
+  // Single swap: the old rows are replaced by the new ones in one paint, so
+  // there is no intermediate empty state to see.
+  root.replaceChildren(frag);
+}
+
+document.getElementById('btn-tree-select').onclick = () => {
+  treeSelectMode = !treeSelectMode;
+  if (!treeSelectMode) treeSelected.clear();
+  document.getElementById('btn-tree-select').textContent = treeSelectMode ? 'Cancel' : 'Select';
+  document.getElementById('btn-tree-delete').classList.toggle('hidden', !treeSelectMode);
+  renderSessionTree();
+};
+
+// Selection is cleared whenever the Data sheet closes. A selection that
+// survives a close is how someone deletes something they ticked ten minutes
+// ago and forgot about.
+function resetTreeSelection() {
+  if (!treeSelectMode && !treeSelected.size) return;
+  treeSelectMode = false;
+  treeSelected.clear();
+  const btn = document.getElementById('btn-tree-select');
+  if (btn) btn.textContent = 'Select';
+  const del = document.getElementById('btn-tree-delete');
+  if (del) del.classList.add('hidden');
+}
+
+document.getElementById('btn-tree-delete').onclick = async () => {
+  if (!treeSelected.size) { await showAlert('Nothing selected', 'Tick the items you want to delete first.'); return; }
+  const nodes = await buildTreeModel();
+
+  // A session whose every record is ticked is treated as "delete the session",
+  // which is what ticking the session checkbox visibly did. Emptying a session
+  // but leaving it behind would be a surprising result of that gesture.
+  const wholeSessions = [];
+  const perRecord = [];
+  for (const node of nodes) {
+    const leaves = leavesOf(node);
+    if (!leaves.length) continue;
+    const selected = leaves.filter(k => treeSelected.has(k));
+    if (!selected.length) continue;
+    if (selected.length === leaves.length && !node.isCurrent) wholeSessions.push(node);
+    else perRecord.push({ node, keys: selected });
+  }
+
+  const recordCount = perRecord.reduce((n, p) => n + p.keys.length, 0)
+    + wholeSessions.reduce((n, s) => n + leavesOf(s).length, 0);
+  const parts = [];
+  if (wholeSessions.length) parts.push(`${wholeSessions.length} session(s)`);
+  if (recordCount) parts.push(`${recordCount} item(s)`);
+  const ok = await askConfirm('Delete selected?',
+    `This will permanently delete ${parts.join(' and ')}, including their files. This can't be undone.`);
+  if (!ok) return;
+
+  try {
+    for (const s of wholeSessions) {
+      await Store.deleteSession(s.sessionId);
+      try { await Storage.deleteSessionFolder(s.sessionId); }
+      catch (e) { logError(`Session removed, but its folder was not deleted: ${e.message}`); }
+    }
+    for (const { node, keys } of perRecord) {
+      for (const key of keys) {
+        const [, group, id] = key.split('/');
+        if (node.isCurrent) {
+          // Live records go through the store, so the mirror deletes the file
+          // for us via the change notification.
+          if (group === 'waypoints') await Store.deleteWaypoint(id);
+          else if (group === 'routes') await Store.deleteRoute(id);
+          else await Store.deleteTrack(id);
+        } else {
+          await removeRecordFromSavedSession(node.sessionId, group, id);
+        }
+      }
+    }
+    treeSelected.clear();
+    treeSelectMode = false;
+    document.getElementById('btn-tree-select').textContent = 'Select';
+    document.getElementById('btn-tree-delete').classList.add('hidden');
+    await redrawAllDataFromStore();
+    renderDataPanel();
+    logInfo(`Deleted ${wholeSessions.length} session(s) and ${recordCount} item(s).`);
+  } catch (e) {
+    logError(`Delete failed: ${e.message}`);
+    await showAlert('Delete failed', e.message);
+  }
+};
+
+// Removes one record from a session that is not currently loaded. Its data
+// lives in the session's stored snapshot rather than the working stores, so
+// the change notification does not fire and the mirrored file has to be
+// removed explicitly.
+async function removeRecordFromSavedSession(sessionId, group, recordId) {
+  const sessions = await Store.getSessions();
+  const sess = sessions.find(x => x.id === sessionId);
+  if (!sess) return;
+  const list = sess[group] || [];
+  const record = list.find(r => r.id === recordId);
+  sess[group] = list.filter(r => r.id !== recordId);
+  await Store.putSession(sess);
+  if (record && Storage.isSafeSessionId(sessionId)) {
+    try {
+      const filename = Storage.safeFilename(`${record.name || 'untitled'}--${record.id}`, '.gpx');
+      await Storage.deleteRecordFile(Storage.sessionDir(sessionId), group, filename);
+    } catch (e) {
+      logError(`Record removed, but its file was not deleted: ${e.message}`);
+    }
+  }
 }
 
 document.getElementById('btn-save-session').onclick = async () => {
   const name = await askName('Save session as', currentSessionName || `Session ${new Date().toLocaleDateString()}`);
   if (name === null) return;
   try {
-    await Store.saveSession(name);
+    const id = Storage.makeSessionId(name);
+    await Store.saveSession(name, id);
     currentSessionName = name;
-    logInfo(`Session "${name}" saved.`);
+    currentSessionId = id;
+
+    // The mirror target follows the active session, so from here on edits land
+    // in this session's own folder rather than continuing to pile up in
+    // current/. Everything stays loaded; only where it is written changes.
+    await Storage.ensureStorageRoot();
+    Mirror.setActiveSession(id);
+    await Mirror.rebuildMirror();
+    // current/ is scratch space for unsaved work. Its contents have just been
+    // written into the session folder, so leaving copies behind would make the
+    // same records appear twice on disk.
+    await Storage.clearCurrentFolder();
+
+    logInfo(`Session "${name}" saved as ${id}.`);
     renderDataPanel();
   } catch (e) {
     logError(`Failed to save session: ${e.message}`);
@@ -3926,6 +4523,11 @@ document.getElementById('btn-new-session').onclick = async () => {
     await Store.clearCurrentData();
     clearAllDataLayers();
     currentSessionName = null;
+    currentSessionId = null;
+    // Back to scratch space. The saved session's folder is deliberately left
+    // alone: starting a new session must never delete a session you saved.
+    Mirror.setActiveSession(null);
+    await Storage.clearCurrentFolder();
     cancelRoutePlanning();
     if (recording) await stopRecordingFlow();
     setFlagMode(false);
@@ -3935,6 +4537,49 @@ document.getElementById('btn-new-session').onclick = async () => {
     logError(`Failed to start new session: ${e.message}`);
   }
 };
+
+// Deleting a session removes its folder as well as its database record, so
+// the confirmation states how many files that is. A session folder is often
+// the only remaining copy of an old trip, and "delete 1 session" reads very
+// differently from "delete 1 session and 214 files".
+async function deleteSessionFlow(session) {
+  let fileCount = 0;
+  try {
+    if (Storage.isSafeSessionId(session.id)) {
+      fileCount = await Storage.countFilesUnder(Storage.sessionDir(session.id));
+    }
+  } catch (e) {
+    // Counting is a courtesy. If storage is unavailable the database record
+    // can still be deleted, and the folder cleaned up later.
+  }
+  const detail = fileCount
+    ? `Delete saved session "${session.name}", including ${fileCount} file(s) in its folder? This can't be undone.`
+    : `Delete saved session "${session.name}"? This can't be undone.`;
+  const ok = await askConfirm('Delete session?', detail);
+  if (!ok) return;
+  try {
+    await Store.deleteSession(session.id);
+    try {
+      await Storage.deleteSessionFolder(session.id);
+    } catch (e) {
+      // The guard refused, or storage is gone. The record is already deleted,
+      // so say so plainly rather than implying nothing happened.
+      logError(`Session removed, but its folder was not deleted: ${e.message}`);
+    }
+    // Deleting the session you are currently in leaves the working data
+    // orphaned, so fall back to scratch space rather than continuing to mirror
+    // into a folder that no longer exists.
+    if (currentSessionId === session.id) {
+      currentSessionId = null;
+      currentSessionName = null;
+      Mirror.setActiveSession(null);
+    }
+    logInfo(`Session "${session.name}" deleted.`);
+    renderDataPanel();
+  } catch (e) {
+    logError(`Failed to delete session: ${e.message}`);
+  }
+}
 
 async function loadSessionFlow(session) {
   const hasData = await Store.hasAnyCurrentData();
@@ -3946,6 +4591,9 @@ async function loadSessionFlow(session) {
     await Store.loadSession(session.id);
     await redrawAllDataFromStore();
     currentSessionName = session.name;
+    currentSessionId = session.id;
+    // Edits from here belong to the loaded session, so the mirror follows it.
+    Mirror.setActiveSession(session.id);
     logInfo(`Session "${session.name}" loaded.`);
     renderDataPanel();
   } catch (e) {

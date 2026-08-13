@@ -95,19 +95,24 @@ function metresBetween(a, b) {
 // from each end. Measured along the path rather than as straight-line distance
 // from the endpoint, so a track that loops back past its own start is not
 // under-trimmed.
-export function trimTrackEnds(points, metres) {
-  if (!metres || metres <= 0 || !Array.isArray(points) || points.length < 3) return points;
+// Start and end are separate: a track often begins at home and ends at a
+// trailhead car park, or the other way round, so trimming both by the same
+// amount either over-trims one end or under-protects the other.
+export function trimTrackEnds(points, startMetres, endMetres) {
+  const from = Math.max(0, startMetres || 0);
+  const to = Math.max(0, endMetres == null ? startMetres || 0 : endMetres);
+  if ((!from && !to) || !Array.isArray(points) || points.length < 3) return points;
 
   let start = 0;
   let travelled = 0;
-  while (start < points.length - 1 && travelled < metres) {
+  while (from && start < points.length - 1 && travelled < from) {
     travelled += metresBetween(points[start], points[start + 1]);
     start++;
   }
 
   let end = points.length - 1;
   travelled = 0;
-  while (end > start && travelled < metres) {
+  while (to && end > start && travelled < to) {
     travelled += metresBetween(points[end], points[end - 1]);
     end--;
   }
@@ -177,7 +182,9 @@ function routeXml(route, opts) {
 
 function trackXml(track, opts) {
   let points = (track.points || []).filter(p => num(p.lat) != null && num(p.lng) != null);
-  if (opts.trimEndsMetres) points = trimTrackEnds(points, opts.trimEndsMetres);
+  if (opts.trimStartMetres || opts.trimEndMetres) {
+    points = trimTrackEnds(points, opts.trimStartMetres, opts.trimEndMetres);
+  }
   if (!points.length) return '';
 
   const pts = points.map((p) => {
@@ -212,14 +219,13 @@ function trackXml(track, opts) {
 export function buildGpx({ name, waypoints = [], routes = [], tracks = [] }, options = {}) {
   const opts = {
     includeTimestamps: options.includeTimestamps !== false,
-    trimEndsMetres: options.trimEndsMetres || 0,
-    // When false, no <extensions> are written at all. The result is plain GPX
-    // with nothing but the elements every reader already understands, at the
-    // cost of icon types and flag-to-route bindings, which have nowhere else
-    // to live. Note this is a belt-and-braces option rather than a fix for a
-    // compatibility problem: extensions in a foreign namespace are explicitly
+    trimStartMetres: options.trimStartMetres || 0,
+    trimEndMetres: options.trimEndMetres || 0,
+    // Kept as a parameter for tests and future callers, but no longer exposed
+    // as a user option. Extensions in a foreign namespace are explicitly
     // permitted by the GPX schema and Garmin's own files use them the same
-    // way, so a conforming reader ignores them.
+    // way, so a conforming reader ignores them. Turning them off only ever
+    // cost Datum-to-Datum fidelity without buying any compatibility.
     includeDatumExtensions: options.includeDatumExtensions !== false
   };
   const body = [

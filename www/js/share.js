@@ -20,147 +20,75 @@ import { buildGpx, parseGpx, GPX_EXTENSION } from './formats/gpx.js';
 // which.
 export const DEFAULT_SHARE_OPTIONS = {
   includeTimestamps: true,
-  trimEndsMetres: 0,
-  // Whether a route export also carries the flags bound to it. On by default
-  // because that is what makes a shared trail complete; set false to send only
-  // the line.
-  includeBoundFlags: true,
-  // Datum extras: icon types and flag-to-route bindings, carried in GPX's
-  // <extensions> element. On keeps a Datum-to-Datum share complete; off emits
-  // nothing but the elements every GPX reader already handles.
-  includeDatumExtensions: true
+  // Separate ends: a track usually starts at one identifying place and
+  // finishes at another, and they rarely want the same treatment.
+  trimStartMetres: 0,
+  trimEndMetres: 0
 };
+
+// Two options were dropped rather than kept at a default. "Include flags bound
+// to a route" only ever applied to the per-route export, which no longer
+// exists now that the mirror writes every record continuously. "Datum extras"
+// controlled whether GPX <extensions> were written, and turning it off only
+// cost Datum-to-Datum fidelity: extensions are schema-legal and every
+// conforming reader already ignores what it does not recognise, so there was
+// nothing to gain by omitting them.
 
 function fileNameFor(name, kind) {
   return Storage.safeFilename(name || `Untitled ${kind}`, GPX_EXTENSION);
 }
 
-// A bound flag exported alone cannot keep its binding: bindings are only
-// rebuildable between records in the same file, and the route is not here.
-// The file still records which route it *was* bound to in its extensions, so
-// importing this flag alongside that route later reconnects them.
-export async function exportFlag(wp, options = DEFAULT_SHARE_OPTIONS) {
-  const xml = buildGpx({ name: wp.name, waypoints: [wp] }, options);
-  return Storage.writeShareFile('flags', fileNameFor(wp.name, 'flag'), xml);
-}
+// Individual waypoint, route and track files are no longer written from here.
+// mirror.js already writes each record to disk as it is created, into
+// current/ or the active session's folder, so a separate export step wrote the
+// same data a second time into a parallel set of folders. What remains is the
+// packaged export: one GPX holding an entire session, which is a genuinely
+// different artifact and the thing you actually hand to someone.
 
-// Bound flags travel with their route by default. A route on its own is valid
-// GPX and opens fine anywhere, but in Datum a route and the flags pinned along
-// it are one thing, and a file that drops half of it is not really a share of
-// that trail. Including them also makes the binding recoverable on import,
-// since bindings can only be rebuilt between records in the same file.
-export async function exportRoute(route, options = DEFAULT_SHARE_OPTIONS) {
+// Writes a whole session as a single GPX INSIDE that session's own folder,
+// alongside its waypoints/routes/tracks subfolders, so everything belonging to
+// a session lives in one place and nothing loose accumulates in sessions/.
+export async function exportSessionPackage(session, options = DEFAULT_SHARE_OPTIONS) {
   const opts = { ...DEFAULT_SHARE_OPTIONS, ...options };
-  // route.id is checked explicitly first. A plain equality test would compare
-  // null to null if a route ever arrived without an id, and every unbound flag
-  // in the database has boundRouteId null, so the whole lot would be swept
-  // into the file. Saved routes always get an id, so this cannot happen today,
-  // but the failure mode is silent and the guard costs nothing.
-  const boundFlags = (opts.includeBoundFlags === false || !route.id)
-    ? []
-    : (await Store.getWaypoints()).filter(wp => wp.boundRouteId && wp.boundRouteId === route.id);
-  const xml = buildGpx({ name: route.name, routes: [route], waypoints: boundFlags }, opts);
-  return Storage.writeShareFile('routes', fileNameFor(route.name, 'route'), xml);
-}
-
-export async function exportTrack(track, options = DEFAULT_SHARE_OPTIONS) {
-  const xml = buildGpx({ name: track.name, tracks: [track] }, options);
-  return Storage.writeShareFile('tracks', fileNameFor(track.name, 'track'), xml);
-}
-
-// A session is a snapshot of all three types, and a GPX document can hold all
-// three, so this is the same builder with more of its arguments filled in.
-export async function exportSession(session, options = DEFAULT_SHARE_OPTIONS) {
   const xml = buildGpx({
     name: session.name,
     waypoints: session.waypoints || [],
     routes: session.routes || [],
     tracks: session.tracks || []
-  }, options);
-  return Storage.writeShareFile('sessions', fileNameFor(session.name, 'session'), xml);
+  }, opts);
+  const filename = fileNameFor(session.name, 'session');
+  const dir = Storage.sessionDir(session.id);
+  await Storage.ensureRecordFolders(dir);
+  await Storage.writeSessionPackage(dir, filename, xml);
+  return filename;
 }
 
-// Imports a GPX file handed to Datum from outside, e.g. by tapping a .gpx
-// attachment or file and choosing Datum. Deliberately reuses the same parse,
-// id-matching and binding-remap path as a folder import, so a file arriving
-// this way is treated no differently from one already in the folders.
-export async function importExternalGpx(uri, onCollision = 'skip') {
-  const text = await Storage.readExternalFile(uri);
-  const parsed = parseGpx(text);
-  if (parsed.errors.length && !parsed.waypoints.length && !parsed.routes.length && !parsed.tracks.length) {
-    throw new Error(parsed.errors[0]);
-  }
-  const index = await buildExistingIndex();
-  // Collisions are computed before writing so the caller can prompt, matching
-  // the folder-import flow. Cancelling then costs nothing.
-  const collisions = [];
-  for (const [type, records] of [['waypoints', parsed.waypoints], ['routes', parsed.routes], ['tracks', parsed.tracks]]) {
-    for (const r of records) {
-      if (r.sourceId && index[type].has(r.sourceId)) collisions.push({ type, name: r.name, id: r.sourceId });
-    }
-  }
-  return { parsed, collisions, text, index };
-}
-
-// Writes an already-parsed external file into the database. Split from the
-// read above so a prompt can sit between them without re-reading the file or
-// rebuilding the index.
-export async function commitExternalGpx(parsed, index, onCollision) {
-  let added = 0, updated = 0, skipped = 0, bindingsRestored = 0, bindingsDropped = 0;
-  const routeIdBySourceId = new Map();
-
-  for (const r of parsed.routes) {
-    const { sourceId, ...record } = r;
-    const existing = sourceId ? index.routes.get(sourceId) : null;
-    if (existing && onCollision === 'skip') { routeIdBySourceId.set(sourceId, existing.id); skipped++; continue; }
-    const saved = await Store.saveRoute({ ...record, id: existing ? existing.id : null });
-    if (sourceId) routeIdBySourceId.set(sourceId, saved.id);
-    if (existing) updated++; else added++;
-  }
-  for (const wp of parsed.waypoints) {
-    const { sourceId, sourceBoundRouteId, ...record } = wp;
-    const existing = sourceId ? index.waypoints.get(sourceId) : null;
-    if (existing && onCollision === 'skip') { skipped++; continue; }
-    const newRouteId = sourceBoundRouteId ? routeIdBySourceId.get(sourceBoundRouteId) : null;
-    if (sourceBoundRouteId) { if (newRouteId) bindingsRestored++; else bindingsDropped++; }
-    await Store.saveWaypoint({
-      ...record,
-      id: existing ? existing.id : null,
-      boundRouteId: newRouteId || null,
-      routeDistance: newRouteId ? record.routeDistance : null
-    });
-    if (existing) updated++; else added++;
-  }
-  for (const t of parsed.tracks) {
-    const { sourceId, ...record } = t;
-    const existing = sourceId ? index.tracks.get(sourceId) : null;
-    if (existing && onCollision === 'skip') { skipped++; continue; }
-    await Store.saveTrack({ ...record, id: existing ? existing.id : null });
-    if (existing) updated++; else added++;
-  }
-  return { added, updated, skipped, bindingsRestored, bindingsDropped };
-}
-
-// Decides which of Datum's folders an adopted file belongs in, based on what
-// it actually contains rather than where it came from.
+// Every place a GPX can legitimately be found: the live session's folders and
+// each saved session's folders. Dropping a file someone sent you into
+// current/waypoints, current/routes or current/tracks is how it gets picked
+// up by "Import from folder".
+// Which record folder an incoming file belongs in, decided by what it holds.
+// A file with more than one record type has no single home, so it goes with
+// whichever type dominates: a route carrying its bound waypoints is a route.
 export function folderForParsed(parsed) {
-  const hasW = parsed.waypoints.length > 0;
-  const hasR = parsed.routes.length > 0;
-  const hasT = parsed.tracks.length > 0;
-  // A single route plus waypoints is a route export carrying its bound flags,
-  // which is Datum's own default format for sharing a route. Treating it as a
-  // session because it holds two record types filed those under sessions/,
-  // where they read as full snapshots rather than the single route they are.
-  if (hasR && !hasT && parsed.routes.length === 1) return 'routes';
-  if (hasT && !hasR && parsed.tracks.length === 1) return 'tracks';
-  if (hasW && !hasR && !hasT) return 'flags';
-  if (hasR && !hasW && !hasT) return 'routes';
-  if (hasT && !hasW && !hasR) return 'tracks';
-  return 'sessions';
+  const w = parsed.waypoints.length, r = parsed.routes.length, t = parsed.tracks.length;
+  if (r && !t) return 'routes';
+  if (t && !r) return 'tracks';
+  if (w && !r && !t) return 'waypoints';
+  // Genuinely mixed (routes and tracks together). Tracks are the bulkier and
+  // more distinctive record, so they decide it.
+  return t ? 'tracks' : 'routes';
 }
 
-export async function listImportable(kind) {
-  return Storage.listShareFiles(kind, GPX_EXTENSION);
+export async function importableLocations() {
+  const locations = [];
+  const current = Storage.currentDir();
+  for (const folder of Storage.RECORD_FOLDERS) locations.push({ dir: current, folder });
+  for (const id of await Storage.listSessionFolders()) {
+    const dir = Storage.sessionDir(id);
+    for (const folder of Storage.RECORD_FOLDERS) locations.push({ dir, folder });
+  }
+  return locations;
 }
 
 /**
@@ -191,8 +119,8 @@ export async function buildExistingIndex() {
 // Reads a file and reports what it would do, without writing anything. The
 // caller needs this to decide whether to prompt at all: asking about
 // collisions before knowing there are any produces a dialog on every import.
-export async function inspectGpxFile(kind, filename) {
-  const text = await Storage.readShareFile(kind, filename);
+export async function inspectGpxFile(loc, filename) {
+  const text = await Storage.readRecordFile(loc.dir, loc.folder, filename);
   const parsed = parseGpx(text);
   const index = await buildExistingIndex();
   const collisions = [];
@@ -217,8 +145,8 @@ export async function inspectGpxFile(kind, filename) {
  * Records with no id, or an id not present locally, are always added as new
  * regardless of this setting.
  */
-export async function importGpxFile(kind, filename, onCollision = 'skip', preloadedIndex = null) {
-  const text = await Storage.readShareFile(kind, filename);
+export async function importGpxFile(loc, filename, onCollision = 'skip', preloadedIndex = null) {
+  const text = await Storage.readRecordFile(loc.dir, loc.folder, filename);
   const parsed = parseGpx(text);
   const index = preloadedIndex || await buildExistingIndex();
   let imported = 0;
@@ -299,17 +227,17 @@ export async function importGpxFile(kind, filename, onCollision = 'skip', preloa
 // Scans every GPX folder for collisions WITHOUT writing anything, so the
 // caller can ask about them once up front. Deciding before the first write is
 // what makes cancelling safe: there is nothing to roll back.
-export async function findCollisions(kinds = ['flags', 'routes', 'tracks', 'sessions']) {
+export async function findCollisions() {
   const index = await buildExistingIndex();
   const collisions = [];
-  for (const kind of kinds) {
-    for (const filename of await listImportable(kind)) {
+  for (const loc of await importableLocations()) {
+    for (const filename of await Storage.listRecordFiles(loc.dir, loc.folder, GPX_EXTENSION)) {
       try {
-        const parsed = parseGpx(await Storage.readShareFile(kind, filename));
+        const parsed = parseGpx(await Storage.readRecordFile(loc.dir, loc.folder, filename));
         for (const [type, records] of [['waypoints', parsed.waypoints], ['routes', parsed.routes], ['tracks', parsed.tracks]]) {
           for (const r of records) {
             if (r.sourceId && index[type].has(r.sourceId)) {
-              collisions.push({ kind, filename, type, name: r.name, id: r.sourceId });
+              collisions.push({ filename, type, name: r.name, id: r.sourceId });
             }
           }
         }
@@ -322,18 +250,18 @@ export async function findCollisions(kinds = ['flags', 'routes', 'tracks', 'sess
   return collisions;
 }
 
-// Scans every GPX folder and imports. Used by a single "import everything
-// shared with me" action, since people drop files wherever their file manager
-// defaults to.
-export async function importAllFrom(kinds = ['flags', 'routes', 'tracks', 'sessions'], onCollision = 'skip') {
+// Scans every folder a GPX can legitimately live in and imports what it finds.
+// Re-importing files the mirror itself wrote is expected and harmless: id
+// matching makes it a no-op rather than a duplication event.
+export async function importAllFrom(_unused, onCollision = 'skip') {
   const summary = { files: 0, imported: 0, updated: 0, skipped: 0, waypoints: 0, routes: 0, tracks: 0, bindingsRestored: 0, bindingsDropped: 0, errors: [] };
-  // Built once and passed down rather than rebuilt per file, which on a folder
-  // with many files would mean reading the entire database repeatedly.
+  // Built once and passed down rather than rebuilt per file, which across many
+  // session folders would mean re-reading the entire database repeatedly.
   const index = await buildExistingIndex();
-  for (const kind of kinds) {
-    for (const filename of await listImportable(kind)) {
+  for (const loc of await importableLocations()) {
+    for (const filename of await Storage.listRecordFiles(loc.dir, loc.folder, GPX_EXTENSION)) {
       try {
-        const res = await importGpxFile(kind, filename, onCollision, index);
+        const res = await importGpxFile(loc, filename, onCollision, index);
         summary.files++;
         summary.imported += res.imported;
         summary.updated += res.updated;
