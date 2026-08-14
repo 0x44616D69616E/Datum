@@ -609,12 +609,43 @@ body.nav-hud-active #map-overlays-stack.scale-bar-hidden { bottom: calc(116px + 
   transition: transform 0.22s cubic-bezier(0.32, 0.72, 0, 1);
   padding-bottom: var(--safe-bottom);
 }
-.sheet.hidden { display: none; transform: translateY(100%); }
-.sheet:not(.hidden) { transform: translateY(0); }
+/* display:none is why the slide animation never played: an element that is
+   not rendered cannot transition, so the sheet simply appeared and vanished
+   despite the transform transition defined above. visibility keeps it in the
+   layout long enough to animate, and the 0s delay on the way out is timed to
+   the transform so it disappears only once it has finished sliding. */
+.sheet.hidden {
+  transform: translateY(100%);
+  visibility: hidden; pointer-events: none;
+  transition: transform 0.22s cubic-bezier(0.32, 0.72, 0, 1), visibility 0s 0.22s;
+}
+.sheet:not(.hidden) {
+  transform: translateY(0);
+  visibility: visible; pointer-events: auto;
+  transition: transform 0.22s cubic-bezier(0.32, 0.72, 0, 1), visibility 0s;
+}
+/* Suppressed while a finger is on the handle: a transition here would fight
+   the drag and make the sheet lag behind the gesture. */
+.sheet.is-dragging { transition: none; }
 
 .sheet-handle {
   width: 36px; height: 4px; border-radius: 3px; background: var(--border);
   margin: 10px auto 4px;
+  /* The handle is the grab target, so it gets a larger hit area than its
+     visual size and stops the drag being read as a page scroll. */
+  position: relative; touch-action: none; cursor: grab;
+}
+.sheet-handle::after {
+  content: ""; position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 120px; height: 34px;
+}
+.sheet-handle:active { cursor: grabbing; }
+body.theme-glass .sheet-handle {
+  background: rgba(255, 255, 255, 0.65);
+  box-shadow:
+    1px 0 0 rgba(0, 0, 0, 0.7), -1px 0 0 rgba(0, 0, 0, 0.7),
+    0 1px 0 rgba(0, 0, 0, 0.7), 0 -1px 0 rgba(0, 0, 0, 0.7);
 }
 .sheet-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -665,6 +696,10 @@ input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent);
 .hint { font-size: 12.5px; color: var(--text-muted); line-height: 1.4; margin: 8px 0; }
 
 .button-row { display: flex; gap: 10px; margin: 12px 0; }
+/* Three destructive-adjacent choices side by side would be cramped and easy to
+   mis-tap, so they stack full width with the safe option last, where a thumb
+   naturally rests. */
+.dialog-actions-stacked { flex-direction: column; align-items: stretch; gap: 8px; }
 /* Checkbox plus wrapped explanatory text. align-items: flex-start keeps the
    box aligned to the first line rather than centred against a tall block. */
 .check-row { display: flex; align-items: flex-start; gap: 10px; margin: 10px 0; }
@@ -905,16 +940,21 @@ input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent);
   width: min(74vw, 290px);
   padding: 8px 10px 10px;
   border-radius: 12px;
-  background: rgba(18, 22, 28, 0.78);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.5);
+  /* Hardcoded values replaced by tokens so the panel follows whichever theme
+     is active, rather than being a third appearance of its own. The Classic
+     values are the tokens' Classic values; Glass makes it properly glassy. */
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-elevated);
   color: var(--text);
   /* Stops a drag from panning the map underneath. Range inputs opt back in
      below, or they would stop responding to touch entirely. */
   touch-action: none;
   user-select: none;
+}
+body:not(.theme-glass) .float-panel {
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 .float-panel input[type="range"] { touch-action: auto; }
 
@@ -939,3 +979,556 @@ input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent);
 /* Dragging feedback, and it also stops the browser interpreting a long drag as
    a text selection or context menu. */
 .float-panel.is-dragging { cursor: grabbing; opacity: 0.92; }
+
+/* =========================================================================
+   Liquid glass theme
+   =========================================================================
+   Opt-in via a class on <body>, so Classic stays exactly as it was rather
+   than being a set of overrides on top of glass.
+
+   Almost all of it comes from re-pointing the design tokens at translucent
+   colours, since every surface in the app already paints with var(--surface)
+   or var(--surface-raised). The only thing tokens cannot express is
+   backdrop-filter, which has to name each container it applies to; that is
+   the list further down.
+
+   The readability problem is real and deliberate to solve, not to ignore:
+   translucent panels over satellite imagery can end up unreadable over a
+   bright snowfield or a dark canyon. Three things compensate:
+     - a text shadow, so glyphs keep an edge against whatever is behind them
+     - brighter borders than Classic uses, so panel boundaries stay legible
+     - a light top highlight, which reads as a glass edge and also separates
+       the panel from bright content directly above it
+   ========================================================================= */
+
+body.theme-glass {
+  /* The fill is a LIGHT tint, not a dark one, and barely present at that.
+     A dark fill is what made the first attempt read as grey: at any alpha
+     high enough to be useful, a dark blue-grey over a map is a grey wash,
+     and reducing the blur does nothing to fix that because the greyness was
+     never the blur. Removing the darkening is the fix. */
+  --surface: rgba(255, 255, 255, 0.07);
+  --surface-raised: rgba(255, 255, 255, 0.13);
+  /* With almost no fill, the border is doing nearly all the work of saying
+     where the panel ends, so it is much brighter than Classic's. */
+  --border: rgba(255, 255, 255, 0.34);
+  --border-soft: rgba(255, 255, 255, 0.18);
+  /* The shadow separates the panel from the map without tinting its interior,
+     which is the whole trick: definition at the edges, clarity in the middle. */
+  --shadow-elevated: 0 10px 30px rgba(0, 0, 0, 0.45);
+  /* 2px is enough to soften map detail into something a panel can sit on
+     without turning it to soup. brightness lifts what is behind rather than
+     darkening it, which is what keeps this from reading as a scrim, and
+     saturate stops the lift washing the colour out. */
+  --glass-blur: blur(2px) saturate(165%) brightness(1.06);
+}
+
+/* Applied to containers only, not to every element. backdrop-filter forces a
+   separate compositing layer per element, and putting one on every button in
+   a scrolling sheet is a real cost on a phone that is also drawing map tiles
+   and holding a GPS lock. */
+body.theme-glass .sheet,
+body.theme-glass .dialog,
+body.theme-glass .popover,
+body.theme-glass .float-panel,
+body.theme-glass .map-overlay,
+body.theme-glass .nav-picker,
+body.theme-glass .toast,
+body.theme-glass #status-chip,
+body.theme-glass #search-results,
+body.theme-glass #compass-ribbon,
+body.theme-glass #nav-hud,
+body.theme-glass #nav-suggest,
+body.theme-glass .fab,
+body.theme-glass .status-pill,
+/* The topbar sits directly over the map, so its controls need real blur
+   rather than only the translucent fill the tokens give them. Controls nested
+   INSIDE an already-blurred panel deliberately do not appear here: stacking
+   backdrop-filter compounds the compositing cost without looking any better. */
+body.theme-glass #topbar .icon-btn,
+body.theme-glass #search-input {
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  /* box-shadow for these lives with the bevel rules further down, so the
+     elevation and the bevel are stated in one place rather than two. */
+}
+
+
+
+/* Muted text is the first casualty of a translucent background, so it is
+   lifted here rather than left at the Classic value. */
+body.theme-glass { --text-muted: #d3dbe5; }
+
+/* Inputs and text areas sit inside an already-translucent panel, so they get a
+   darker fill instead of a second blur layer: stacking blurs compounds the
+   cost and muddies the result. */
+body.theme-glass input[type="text"],
+body.theme-glass input[type="number"],
+body.theme-glass textarea,
+body.theme-glass select {
+  background: rgba(255, 255, 255, 0.10);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+/* The backdrop stays lighter in glass mode. A heavy scrim behind a translucent
+   dialog is self-defeating: it hides exactly the thing the transparency is
+   there to reveal. */
+body.theme-glass #backdrop { background: rgba(0, 0, 0, 0.10); }
+
+/* Primary buttons are translucent too. Leaving them opaque while every other
+   button was see-through made them look like they belonged to a different
+   theme. They stay the most prominent control through colour and the bevel
+   rather than through being the only solid thing on screen. */
+body.theme-glass .btn-primary,
+body.theme-glass .pill-btn-accent,
+body.theme-glass .fab-main {
+  background: rgba(76, 139, 245, 0.62);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+/* Leaflet's own popups are outside the app's markup, so they need naming. */
+body.theme-glass .leaflet-popup-content-wrapper,
+body.theme-glass .leaflet-popup-tip {
+  background: var(--surface);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--border);
+  color: var(--text);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+}
+
+/* Panels that can be dragged say so. Applied in both themes, since dragging
+   is not a glass-only behaviour. */
+.draggable-panel { touch-action: none; }
+.draggable-panel.is-dragging { opacity: 0.92; }
+
+/* -------------------------------------------------------------------------
+   Glass mode legibility: glyphs and marks, not just text
+   -------------------------------------------------------------------------
+   text-shadow only affects text. Every icon in the app is inline SVG, and the
+   compass ticks are divs with a background colour, so neither got any of the
+   halo added above and both effectively vanished over a light map. Icons need
+   drop-shadow and marks need box-shadow.
+
+   All of it is scoped to body.theme-glass. Classic has an opaque panel behind
+   these already, and adding shadows there would muddy sharp icons for no gain.
+   ------------------------------------------------------------------------- */
+
+/* Two stacked shadows rather than one: the tight one gives a crisp edge
+   against light backgrounds, the wider one lifts the glyph off busy detail
+
+
+/* The compass ribbon reads as a row of hairlines, which is exactly the sort of
+   thin mark that disappears first. Ticks get their own glow and brighter fill,
+   since a 1px line has no interior for a shadow to sit against. */
+body.theme-glass .compass-tick {
+  background: rgba(255, 255, 255, 0.75);
+  box-shadow:
+    1px 0 0 rgba(0, 0, 0, 0.9), -1px 0 0 rgba(0, 0, 0, 0.9),
+    0 1px 0 rgba(0, 0, 0, 0.9), 0 -1px 0 rgba(0, 0, 0, 0.9);
+}
+body.theme-glass .compass-tick.major {
+  background: #ffffff;
+  box-shadow:
+    1px 0 0 rgba(0, 0, 0, 0.95), -1px 0 0 rgba(0, 0, 0, 0.95),
+    0 1px 0 rgba(0, 0, 0, 0.95), 0 -1px 0 rgba(0, 0, 0, 0.95);
+}
+body.theme-glass .compass-tick-label { color: #f2f6fa; }
+body.theme-glass .compass-tick-label.north { color: #ff7b80; }
+body.theme-glass .compass-ribbon-pointer {
+  box-shadow:
+    1px 0 0 rgba(0, 0, 0, 0.9), -1px 0 0 rgba(0, 0, 0, 0.9),
+    0 1px 0 rgba(0, 0, 0, 0.9), 0 -1px 0 rgba(0, 0, 0, 0.9);
+}
+
+
+
+/* Button labels sit on the lightest fill in the app, so they are the first
+   text to wash out. text-shadow is inherited, but stating it here means it
+
+
+/* Disabled controls fade to 0.4 in Classic, which works against a solid panel
+   but is invisible against a clear one. Lifted here so "disabled" still reads
+   as a control rather than as empty space. */
+body.theme-glass .trim-controls.is-disabled { opacity: 0.62; }
+body.theme-glass .float-panel-actions button:disabled { opacity: 0.6; }
+
+
+
+
+
+/* -------------------------------------------------------------------------
+   Glass mode: bevels, button fills, and section separation
+   -------------------------------------------------------------------------
+   Three problems, one theme:
+
+   1. Solid blue buttons read fine but red and secondary ones vanished. The
+      accent tokens were overridden for glass; --danger-soft and --accent-soft
+      were not, so a danger button was still 14% red painted over a panel that
+      is itself only 7% white. Two nearly-transparent layers is nothing.
+
+   2. Section dividers used --border-soft, which at 18% white over satellite
+      imagery is indistinguishable from the map behind it.
+
+   3. Panels had a single top highlight, which reads as a lit edge but not as
+      a raised object.
+
+   The fix for the third is a proper bevel rather than a darker fill: light on
+   the top and left, shadow on the bottom and right, all inset. That gives the
+   contrast a flat tint would give, but as an edge effect, so the middle of the
+   panel stays as clear as it is now. It is also what makes glass look like
+   glass rather than like a translucent rectangle.
+   ------------------------------------------------------------------------- */
+
+body.theme-glass {
+  /* Light from above-left, shadow below-right. The asymmetry is what sells
+     the raised look; an even outline just reads as a border. */
+  --glass-bevel:
+    inset 0 1px 0 rgba(255, 255, 255, 0.48),
+    inset 1px 0 0 rgba(255, 255, 255, 0.20),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.42),
+    inset -1px 0 0 rgba(0, 0, 0, 0.28);
+  /* Dividers need to survive being drawn over aerial imagery, so they are far
+     brighter than Classic's and carry their own shadow. */
+  --border-soft: rgba(255, 255, 255, 0.30);
+  --accent-soft: rgba(76, 139, 245, 0.55);
+  --danger-soft: rgba(230, 72, 79, 0.55);
+}
+
+/* Panels get the bevel in place of the single top highlight. */
+body.theme-glass .sheet,
+body.theme-glass .dialog,
+body.theme-glass .popover,
+body.theme-glass .float-panel,
+body.theme-glass .map-overlay,
+body.theme-glass .nav-picker,
+body.theme-glass .toast,
+body.theme-glass #status-chip,
+body.theme-glass #search-results,
+body.theme-glass #compass-ribbon,
+body.theme-glass #nav-hud,
+body.theme-glass #nav-suggest,
+body.theme-glass .fab,
+body.theme-glass .status-pill,
+body.theme-glass #topbar .icon-btn,
+body.theme-glass #search-input {
+  box-shadow: var(--shadow-elevated), var(--glass-bevel);
+}
+
+/* Buttons are the elements a user needs to identify fastest, so they get a
+   stronger bevel and an outer shadow that lifts them off the panel. */
+/* Softened and pulled onto the element's own geometry. The first version used
+   hard 1px inset lines plus an outer drop shadow: the hard bottom line read as
+   a drawn stroke rather than a lit edge, and the outer shadow sat slightly
+   outside the shape so the two never looked like the same object. Blurred
+   insets with no outer offset follow the border radius exactly and shade into
+   the surface instead of ending abruptly. */
+body.theme-glass .btn-primary,
+body.theme-glass .btn-secondary,
+body.theme-glass .btn-danger,
+body.theme-glass .pill-btn,
+body.theme-glass .tree-action,
+body.theme-glass .icon-picker-btn,
+body.theme-glass .item-actions button,
+body.theme-glass .switch-track {
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.40),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.26);
+}
+
+/* FABs float directly over the map, so they need the soft bevel AND an outer
+   shadow. Without the shadow they sit flat against the imagery; the earlier
+   panel rule gave them elevation but the hard-edged bevel, and this states
+   both together rather than letting one rule silently replace the other. */
+body.theme-glass .fab {
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.40),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.26),
+    0 4px 12px rgba(0, 0, 0, 0.45);
+}
+
+/* Red and secondary buttons need a real fill, the same way blue already has
+   one. A button that cannot be told from the panel it sits on is not a
+   button. These are still translucent, just enough to be unmistakably there. */
+body.theme-glass .btn-danger,
+body.theme-glass .pill-btn-danger {
+  background: rgba(214, 58, 65, 0.62);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.38);
+}
+body.theme-glass .btn-secondary,
+body.theme-glass .pill-btn-ghost,
+body.theme-glass .tree-action {
+  background: rgba(255, 255, 255, 0.22);
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.40);
+}
+body.theme-glass .btn-primary,
+body.theme-glass .pill-btn-accent { border-color: rgba(255, 255, 255, 0.38); }
+
+/* Section boundaries: a bright line plus a dark one directly beneath it reads
+   as an engraved groove and stays visible over any imagery, where a single
+   hairline of either colour disappears against something of similar tone. */
+body.theme-glass .data-section,
+body.theme-glass .sheet-header {
+  border-color: rgba(255, 255, 255, 0.34);
+  box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.30);
+}
+body.theme-glass .toggle-row,
+body.theme-glass .popover-row,
+body.theme-glass .result-item,
+body.theme-glass .tree-row,
+body.theme-glass .layer-row {
+  border-color: rgba(255, 255, 255, 0.26);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.28);
+}
+
+/* Section headings were --text-muted, which is the first thing to disappear.
+   Uppercase small text over imagery needs to be near-white and weighted. */
+body.theme-glass .data-section h3 {
+  color: #f0f4f8;
+  font-weight: 700;
+}
+
+/* Checked states need to read at a glance while walking. */
+body.theme-glass input[type="checkbox"]:checked { accent-color: var(--accent); }
+
+/* -------------------------------------------------------------------------
+   Glass mode: inputs, red text, and the scale bar
+   ------------------------------------------------------------------------- */
+
+/* Inputs were at 10% white, which over aerial imagery is close to no field at
+   all: the placeholder, the value and the box edge all competed with whatever
+   was behind them. Text entry is the one place where seeing exactly what you
+   typed matters more than seeing the map, so these are the least transparent
+   surfaces in the theme. */
+body.theme-glass input[type="text"],
+body.theme-glass input[type="number"],
+body.theme-glass input[type="search"],
+body.theme-glass textarea,
+body.theme-glass select,
+body.theme-glass #search-input,
+body.theme-glass #region-search-input {
+  background: rgba(12, 17, 24, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  color: #ffffff;
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.45),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.16);
+}
+/* Inset rather than raised on purpose: a text field should read as a recess
+   you type into, which is the opposite of the raised bevel on buttons and is
+   what tells the two apart at a glance. */
+body.theme-glass input::placeholder,
+body.theme-glass textarea::placeholder {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+/* Red text carries warnings and destructive actions, so it has to survive
+   being drawn over anything. A white outline separates the glyph from the
+   background whatever colour that is, and the black shadow underneath stops
+   the outline itself glowing into light imagery. */
+/* Buttons are handled with the other button text further down, where they get
+   white glyphs on a black outline. Only genuine red TEXT is left here, and the
+   final rule at the end of the file supersedes this for the warning line. */
+
+
+/* The scale bar is deliberately NOT restyled for glass. Classic draws it dark
+   with its own halo, designed to stay legible over any basemap, and that still
+   holds here. Recolouring it white made it inconsistent with Classic for no
+   gain, and the first attempt changed only the borders and left the text dark,
+   which inverted the control against itself. */
+
+
+/* -------------------------------------------------------------------------
+   Glass mode, final pass: no outer shadows, white text with black outlines
+   ------------------------------------------------------------------------- */
+
+/* Outer drop shadows removed. They put a dark halo around every panel edge,
+   which is the one thing that still read as "dark overlay" in a theme built
+   to avoid exactly that. The bevel already says where a panel ends, and it
+   does it with an edge rather than with a cloud of shade around it. */
+body.theme-glass {
+  /* Panels keep their elevation. Removing this flattened them against the map
+     and was a misreading of "remove shadows", which meant the blurred glow
+     around text and icons, not the lift under a panel. */
+  --shadow-elevated: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+body.theme-glass .sheet,
+body.theme-glass .dialog,
+body.theme-glass .popover,
+body.theme-glass .float-panel,
+body.theme-glass .map-overlay,
+body.theme-glass .nav-picker,
+body.theme-glass .toast,
+body.theme-glass #status-chip,
+body.theme-glass #search-results,
+body.theme-glass #compass-ribbon,
+body.theme-glass #nav-hud,
+body.theme-glass #nav-suggest,
+body.theme-glass .status-pill,
+body.theme-glass #topbar .icon-btn,
+body.theme-glass #search-input {
+  box-shadow: var(--shadow-elevated), var(--glass-bevel);
+}
+body.theme-glass .fab {
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.40),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.26),
+    0 4px 12px rgba(0, 0, 0, 0.45);
+}
+
+/* Blue pill buttons were still solid. .pill-btn carries the accent fill on the
+   base class, so overriding only .pill-btn-accent left More and Trim opaque
+   while Delete beside them was see-through. */
+body.theme-glass .pill-btn {
+  background: rgba(76, 139, 245, 0.62);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid rgba(255, 255, 255, 0.38);
+}
+body.theme-glass .pill-btn-ghost {
+  background: rgba(255, 255, 255, 0.22);
+  color: var(--text);
+}
+body.theme-glass .pill-btn-danger,
+body.theme-glass .item-actions button.danger {
+  background: rgba(214, 58, 65, 0.62);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+}
+
+
+
+/* -------------------------------------------------------------------------
+   Glass mode: crisp black borders, not glows
+   -------------------------------------------------------------------------
+   Everything above used blurred shadows, and a shadow with zero offset and a
+   blur radius IS a glow: it spreads outward evenly and softens the glyph edge
+   rather than defining it. Against busy imagery that reads as haze around the
+   text instead of a boundary.
+
+   A border needs zero blur and offsets in every direction, so the copies land
+   just outside the glyph and butt against it cleanly. Eight directions for
+   text (four would leave gaps on diagonal strokes), four for icons, which are
+   already thick enough not to need the corners.
+
+   Declared last so it wins over every earlier text-shadow and filter.
+   ------------------------------------------------------------------------- */
+
+body.theme-glass {
+  --outline-text:
+    1px 1px 0 #000, -1px 1px 0 #000, 1px -1px 0 #000, -1px -1px 0 #000,
+    0 1px 0 #000, 0 -1px 0 #000, 1px 0 0 #000, -1px 0 0 #000;
+  --outline-icon:
+    drop-shadow(1px 0 0 #000) drop-shadow(-1px 0 0 #000)
+    drop-shadow(0 1px 0 #000) drop-shadow(0 -1px 0 #000);
+}
+
+body.theme-glass .sheet,
+body.theme-glass .dialog,
+body.theme-glass .popover,
+body.theme-glass .float-panel,
+body.theme-glass .map-overlay,
+body.theme-glass .toast,
+body.theme-glass #status-chip,
+body.theme-glass #compass-ribbon,
+body.theme-glass #nav-hud,
+body.theme-glass #nav-suggest,
+body.theme-glass .status-pill,
+body.theme-glass button,
+body.theme-glass .btn-primary,
+body.theme-glass .btn-secondary,
+body.theme-glass .btn-danger,
+body.theme-glass .pill-btn,
+body.theme-glass .pill-btn-danger,
+body.theme-glass .pill-btn-ghost,
+body.theme-glass .pill-btn-accent,
+body.theme-glass .tree-action,
+body.theme-glass .tree-name,
+body.theme-glass .item-actions button,
+body.theme-glass .toggle-title,
+body.theme-glass label,
+body.theme-glass .hint,
+body.theme-glass .slider-label,
+body.theme-glass .slider-out,
+body.theme-glass .compass-tick-label,
+body.theme-glass .data-section h3 {
+  text-shadow: var(--outline-text);
+}
+
+body.theme-glass .fab svg,
+body.theme-glass .icon-btn svg,
+body.theme-glass .pill-icon-btn svg,
+body.theme-glass .sheet-close svg,
+body.theme-glass .tree-icon svg,
+body.theme-glass .tree-twisty,
+body.theme-glass .icon-picker-btn svg,
+body.theme-glass .map-overlay svg,
+body.theme-glass .status-pill svg,
+body.theme-glass input[type="checkbox"],
+body.theme-glass input[type="range"] {
+  filter: var(--outline-icon);
+}
+
+
+
+/* Red warning text keeps its colour and gets a white border with a black one
+   outside it, so it separates from both light and dark backgrounds. Still a
+   border, no blur. */
+body.theme-glass .float-panel-warning,
+body.theme-glass .hint.danger,
+body.theme-glass .text-danger,
+body.theme-glass .danger:not(button) {
+  color: #ff6b72;
+  /* Black border only. The white ring that used to sit inside it made the
+     glyphs read as white-outlined shapes that happened to be filled red,
+     rather than as red text with an edge. */
+  text-shadow: var(--outline-text);
+}
+
+/* Blue buttons get the border too. The earlier exclusion assumed a solid blue
+   fill behind white text, which is no longer true: these are translucent, so
+   the actual backdrop is whatever the map happens to be, and white on a pale
+   satellite tile has no contrast at all without an outline. */
+body.theme-glass .btn-primary,
+body.theme-glass .pill-btn-accent,
+body.theme-glass .fab-main { text-shadow: var(--outline-text); }
+
+/* Leaflet builds its own popup markup outside the app's DOM, so the bevel has
+   to name it. Without this the route popup was the one floating panel with no
+   edge treatment at all. */
+body.theme-glass .leaflet-popup-content-wrapper {
+  box-shadow: var(--shadow-elevated), var(--glass-bevel);
+}
+
+/* The GPS dot is a bare coloured circle with no panel behind it, so it needs
+   its own edge to stay readable against light imagery. box-shadow rather than
+   a border, which would shrink the dot rather than surround it. */
+body.theme-glass .gps-dot {
+  box-shadow:
+    1px 0 0 rgba(0, 0, 0, 0.9), -1px 0 0 rgba(0, 0, 0, 0.9),
+    0 1px 0 rgba(0, 0, 0, 0.9), 0 -1px 0 rgba(0, 0, 0, 0.9);
+}
+
+/* The record button when pinned outside the collapsible menu. It sits alone
+   over the map with no neighbours to group it, so it carries a stronger edge
+   than the buttons in the stack do. */
+.fab.pinned {
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35), var(--shadow-elevated);
+}
+/* While recording, the pulse animation owns box-shadow, so the pinned ring is
+   folded into its keyframes rather than fighting them. */
+.fab.pinned.recording { box-shadow: none; }
+@keyframes recordGlowPinned {
+  0%, 100% {
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.45), 0 0 0 4px rgba(230, 72, 79, 0.6), var(--shadow-elevated);
+  }
+  50% {
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.45), 0 0 0 14px rgba(230, 72, 79, 0), var(--shadow-elevated);
+  }
+}
+.fab.pinned.recording { animation: recordGlowPinned 1.4s ease-in-out infinite; }
+body.theme-glass .fab.pinned { border: 1px solid rgba(255, 255, 255, 0.45); }

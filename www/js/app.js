@@ -27,6 +27,15 @@ const backdrop = document.getElementById('backdrop');
 // attached to the shared dialog for the next caller to trip over.
 const dialogDismissHandlers = new Map();
 
+// ---------- Theme ----------
+// Applied at module load rather than during init, so the app never paints
+// Classic for a frame and then switches. Module scripts are deferred, so
+// document.body is already parsed by the time this runs.
+function applyTheme(glass) {
+  document.body.classList.toggle('theme-glass', !!glass);
+}
+applyTheme(localStorage.getItem('glassTheme') === 'true');
+
 // Tree selection state. Declared here, above closeOverlay, and NOT down with
 // the rest of the tree code: closeOverlay clears the selection when the Data
 // sheet closes, and a `let` declared further down the file would still be in
@@ -52,11 +61,21 @@ function makeDraggable(panel) {
     // slider thumb would fight the slider and neither would work properly.
     if (e.target.closest('input, button, output, select, textarea, a')) return;
     const rect = panel.getBoundingClientRect();
-    // The panel is first placed with a translateX(-50%) to centre it. Dragging
-    // works in absolute left/top, so the transform is dropped here and the
-    // measured position adopted instead; leaving it would offset every
-    // subsequent position by half the panel width.
+    // Hand off from whatever CSS was positioning the panel to plain left/top,
+    // taking the measured position so nothing moves at the moment of pickup.
+    //
+    // Three things have to be neutralised, and missing any one of them makes
+    // the panel jump on first touch:
+    //   transform, used to centre both the trim panel and the dialogs
+    //   right, since a dialog sets left AND right and is therefore stretched;
+    //     releasing only left would collapse it to content width
+    //   transition, which would otherwise animate every drag frame and make
+    //     the panel lag behind the finger
+    panel.style.width = `${rect.width}px`;
     panel.style.transform = 'none';
+    panel.style.right = 'auto';
+    panel.style.bottom = 'auto';
+    panel.style.transition = 'none';
     panel.style.left = `${rect.left}px`;
     panel.style.top = `${rect.top}px`;
     dragging = true;
@@ -89,11 +108,74 @@ function makeDraggable(panel) {
     if (!dragging) return;
     dragging = false;
     panel.classList.remove('is-dragging');
+    // Restored so the open/close animation still runs next time.
+    panel.style.transition = '';
     try { panel.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
   };
   panel.addEventListener('pointerup', end);
   panel.addEventListener('pointercancel', end);
 }
+
+// Lets a bottom sheet be pulled down by its handle, either to peek at the map
+// underneath and let go, or to dismiss it entirely.
+//
+// The threshold is a fraction of the sheet's own height rather than a fixed
+// pixel count, so a short sheet does not need the same long drag as a tall
+// one. Velocity is also considered: a quick flick is unambiguous intent to
+// close even if the finger never travelled far, which is how every native
+// bottom sheet behaves and what a user will expect.
+function makeSheetDraggable(sheet) {
+  const handle = sheet.querySelector('.sheet-handle');
+  if (!handle) return;
+
+  let dragging = false;
+  let startY = 0, lastY = 0, lastT = 0, velocity = 0, height = 0;
+
+  const setOffset = (px) => { sheet.style.transform = `translateY(${px}px)`; };
+
+  handle.addEventListener('pointerdown', (e) => {
+    dragging = true;
+    height = sheet.getBoundingClientRect().height || 1;
+    startY = lastY = e.clientY;
+    lastT = performance.now();
+    velocity = 0;
+    sheet.classList.add('is-dragging');
+    handle.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  handle.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    // Downward only. Dragging up would lift the sheet past its docked position
+    // and reveal the gap beneath it, which has nothing in it.
+    const dy = Math.max(0, e.clientY - startY);
+    const now = performance.now();
+    const dt = now - lastT;
+    if (dt > 0) velocity = (e.clientY - lastY) / dt; // px per ms
+    lastY = e.clientY;
+    lastT = now;
+    setOffset(dy);
+  });
+
+  const release = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    sheet.classList.remove('is-dragging');
+    try { handle.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
+
+    const dragged = Math.max(0, lastY - startY);
+    const flicked = velocity > 0.55; // downward flick, px/ms
+    // Inline transform is cleared either way so the class-driven transition
+    // takes over; leaving it set would pin the sheet where the finger left it.
+    sheet.style.transform = '';
+    if (dragged > height * 0.32 || flicked) closeOverlay(sheet.id);
+  };
+  handle.addEventListener('pointerup', release);
+  handle.addEventListener('pointercancel', release);
+}
+
+// Every sheet, wired once at startup.
+document.querySelectorAll('.sheet').forEach(makeSheetDraggable);
 
 // Transient notice for things that happen without the user asking. Deliberately
 // not a dialog: these are informational, and a modal would interrupt whatever
@@ -144,7 +226,23 @@ function openOverlay(id) {
 // and several flows deliberately chain one dialog into the next.
 function openDialog(id) {
   document.querySelectorAll('.dialog').forEach((el) => el.classList.add('hidden'));
-  document.getElementById(id).classList.remove('hidden');
+  const el = document.getElementById(id);
+  el.classList.remove('hidden');
+  // Every dialog is movable, same as the trim panel. A dialog often covers the
+  // exact part of the map the decision is about, and being able to shove it
+  // aside is more useful than any amount of careful default placement.
+  //
+  // Position is deliberately NOT persisted between openings here, unlike the
+  // trim panel: dialogs are transient and appear in response to an action, so
+  // one reopening in a corner because it was dragged there an hour ago would
+  // read as a bug rather than as a preference.
+  el.style.left = ''; el.style.top = ''; el.style.transform = '';
+  el.style.right = ''; el.style.bottom = ''; el.style.width = '';
+  if (!el.dataset.draggable) {
+    makeDraggable(el);
+    el.dataset.draggable = 'true';
+    el.classList.add('draggable-panel');
+  }
   showBackdrop();
 }
 function closeOverlay(id) {
@@ -563,6 +661,14 @@ hideScaleBarToggle.addEventListener('change', () => {
 // live route-planning pill, live track recording stats, and the saved
 // routes list. Off by default (miles/feet), matching this app's other
 // US-centric data sources (BLM land, US state boundaries).
+const glassToggle = document.getElementById('toggle-glass-theme');
+glassToggle.checked = localStorage.getItem('glassTheme') === 'true';
+glassToggle.addEventListener('change', () => {
+  localStorage.setItem('glassTheme', glassToggle.checked ? 'true' : 'false');
+  applyTheme(glassToggle.checked);
+  logInfo(`Theme: ${glassToggle.checked ? 'Liquid glass' : 'Classic'}.`);
+});
+
 let useMetric = localStorage.getItem('useMetricUnits') === 'true';
 const metricToggle = document.getElementById('toggle-metric-units');
 metricToggle.checked = useMetric;
@@ -1378,11 +1484,45 @@ function syncTrimUI() {
   }
 }
 
-document.getElementById('share-trim-enabled').onchange = syncTrimUI;
+// Persisted alongside the other settings, using the same read-on-start,
+// write-on-change shape the twelve existing toggles use. A privacy control
+// that resets every launch is one the user will forget on exactly the run
+// where it mattered.
+//
+// Trim is stored in metres rather than raw slider position, because the slider
+// maximum is derived from the length of whatever is being exported and so
+// means something different next time.
+function persistShareOptions() {
+  localStorage.setItem('shareIncludeTimestamps', document.getElementById('share-include-timestamps').checked ? 'true' : 'false');
+  localStorage.setItem('shareTrimEnabled', document.getElementById('share-trim-enabled').checked ? 'true' : 'false');
+  localStorage.setItem('shareTrimStartMetres', String(+document.getElementById('share-trim-start').value || 0));
+  localStorage.setItem('shareTrimEndMetres', String(+document.getElementById('share-trim-end').value || 0));
+}
+
+function restoreShareOptions() {
+  // Timestamps default OFF. A path alone shows where a trail goes; timestamps
+  // also show what hours you were out, so the quieter option is the one you
+  // get without having to think about it.
+  document.getElementById('share-include-timestamps').checked =
+    localStorage.getItem('shareIncludeTimestamps') === 'true';
+  document.getElementById('share-trim-enabled').checked =
+    localStorage.getItem('shareTrimEnabled') === 'true';
+  document.getElementById('share-trim-start').value = +localStorage.getItem('shareTrimStartMetres') || 0;
+  document.getElementById('share-trim-end').value = +localStorage.getItem('shareTrimEndMetres') || 0;
+  // Must run after the checkbox is set, or the sliders stay visually disabled
+  // while reporting the restored values.
+  syncTrimUI();
+}
+
+document.getElementById('share-include-timestamps').addEventListener('change', persistShareOptions);
+document.getElementById('share-trim-enabled').addEventListener('change', () => { syncTrimUI(); persistShareOptions(); });
 for (const which of ['start', 'end']) {
   document.getElementById(`share-trim-${which}`).addEventListener('input', syncTrimUI);
+  // Written on change rather than input: dragging a slider fires input on
+  // every pixel, and writing to localStorage that often is wasteful.
+  document.getElementById(`share-trim-${which}`).addEventListener('change', persistShareOptions);
 }
-syncTrimUI();
+restoreShareOptions();
 
 // Read fresh on each use rather than cached, so a change applies to the very
 // next action with no apply step.
@@ -2926,9 +3066,39 @@ async function redrawAllDataFromStore() {
       let dist = 0;
       for (let i = 1; i < t.points.length; i++) dist += GPS.distanceMiles(t.points[i - 1], t.points[i]);
       const latlngs = t.points.map(p => [p.lat, p.lng]);
-      const popupHtml = `<b>${t.name}</b><br>${GPS.formatDistance(dist, useMetric)}`;
+      const popupHtml = `<b>${t.name}</b><br>${GPS.formatDistance(dist, useMetric)}`
+        + `<br><button type="button" class="pill-btn track-popup-more">More</button> `
+        + `<button type="button" class="pill-btn track-popup-trim">Trim</button> `
+        + `<button type="button" class="pill-btn pill-btn-danger track-popup-delete">Delete</button>`;
       const hitLine = L.polyline(latlngs, { color: '#000', weight: 22, opacity: 0 }).bindPopup(popupHtml);
       const visibleLine = L.polyline(latlngs, { color: '#e6484f', weight: 3 }).bindPopup(popupHtml);
+
+      // Both the visible line and the wide invisible hit line carry their own
+      // popup instance, so wiring only one leaves the buttons dead depending
+      // on exactly where the tap landed. Same reason as the route version.
+      const wireTrackPopupButtons = (layer) => {
+        layer.on('popupopen', (e) => {
+          const el = e.popup.getElement();
+          if (!el) return;
+          const moreBtn = el.querySelector('.track-popup-more');
+          if (moreBtn) moreBtn.onclick = () => { map.closePopup(); openRouteDetailsSheet(t, 'track'); };
+          const trimBtn = el.querySelector('.track-popup-trim');
+          if (trimBtn) trimBtn.onclick = () => { map.closePopup(); openTrimRouteDialog(t, 'track'); };
+          const delBtn = el.querySelector('.track-popup-delete');
+          if (delBtn) delBtn.onclick = async () => {
+            map.closePopup();
+            const ok = await askConfirm('Delete track?', `Delete recorded track "${t.name}"? This can't be undone.`);
+            if (!ok) return;
+            await Store.deleteTrack(t.id);
+            logInfo(`Track "${t.name}" deleted.`);
+            await redrawAllDataFromStore();
+            renderDataPanel();
+          };
+        });
+      };
+      wireTrackPopupButtons(hitLine);
+      wireTrackPopupButtons(visibleLine);
+
       hitLine.addTo(map);
       visibleLine.addTo(map);
       sessionOverlayLines.push(hitLine, visibleLine);
@@ -2941,27 +3111,76 @@ async function redrawAllDataFromStore() {
 redrawAllDataFromStore();
 
 // ---------- Route details sheet (opened via "More" on a route's map popup) ----------
-let routeDetailsContext = null; // the full route object currently shown in the sheet
+let routeDetailsContext = null;
+// Which store the open details sheet belongs to, so rename and delete write
+// back to the right one.
+let routeDetailsKind = 'route'; // the full route object currently shown in the sheet
 
-function openRouteDetailsSheet(route) {
+// kind is 'route' or 'track'. Held on the context so the rename and delete
+// handlers write back to the right store.
+function openRouteDetailsSheet(route, kind = 'route') {
   routeDetailsContext = route;
+  routeDetailsKind = kind;
   renderRouteDetailsSheet(route);
   openOverlay('sheet-route-details');
 }
 
 function renderRouteDetailsSheet(route) {
+  const isTrack = routeDetailsKind === 'track';
   document.getElementById('route-details-name').textContent = route.name;
   const segmentsList = document.getElementById('route-details-segments');
   segmentsList.innerHTML = '';
+
   let total = 0;
-  for (let i = 1; i < route.points.length; i++) {
-    const segDist = GPS.distanceMiles(route.points[i - 1], route.points[i]);
-    total += segDist;
-    const li = document.createElement('li');
-    li.innerHTML = `<span>Point ${i} &rarr; Point ${i + 1}<br><small>${GPS.formatDistance(segDist, useMetric)}</small></span>`;
-    segmentsList.appendChild(li);
+  for (let i = 1; i < route.points.length; i++) total += GPS.distanceMiles(route.points[i - 1], route.points[i]);
+
+  // Navigation follows a planned route. Offering it for a recorded track would
+  // mean navigating a path already walked, point by point, which is not what
+  // the feature does.
+  document.getElementById('btn-route-details-navigate').classList.toggle('hidden', isTrack);
+
+  // A plotted route has a handful of deliberate points, so listing each
+  // segment is useful. A recorded track has one every few seconds, so the same
+  // list would be thousands of rows of a few metres each: slow to build and
+  // telling the user nothing. Tracks get a summary instead.
+  document.getElementById('route-details-segments-title').textContent = isTrack ? 'Recording' : 'Segments';
+  if (isTrack) {
+    const rows = [];
+    if (route.startedAt) rows.push(['Started', new Date(route.startedAt).toLocaleString()]);
+    if (route.endedAt) rows.push(['Finished', new Date(route.endedAt).toLocaleString()]);
+    if (route.startedAt && route.endedAt) {
+      const mins = Math.max(0, Math.round((route.endedAt - route.startedAt) / 60000));
+      rows.push(['Duration', `${Math.floor(mins / 60)}h ${mins % 60}m`]);
+      if (mins > 0) rows.push(['Average pace', `${GPS.formatDistance(total / (mins / 60), useMetric)} per hour`]);
+    }
+    const withEle = route.points.filter(p => typeof p.altitude === 'number');
+    if (withEle.length > 1) {
+      let gain = 0;
+      for (let i = 1; i < withEle.length; i++) {
+        const d = withEle[i].altitude - withEle[i - 1].altitude;
+        // Only rises count toward gain, and a small threshold keeps GPS
+        // altitude noise from accumulating into a fictional climb.
+        if (d > 1) gain += d;
+      }
+      rows.push(['Elevation gain', GPS.formatElevation(gain, useMetric)]);
+    }
+    rows.push(['Points recorded', String(route.points.length)]);
+    for (const [label, value] of rows) {
+      const li = document.createElement('li');
+      li.innerHTML = `<span>${label}<br><small>${value}</small></span>`;
+      segmentsList.appendChild(li);
+    }
+  } else {
+    for (let i = 1; i < route.points.length; i++) {
+      const segDist = GPS.distanceMiles(route.points[i - 1], route.points[i]);
+      const li = document.createElement('li');
+      li.innerHTML = `<span>Point ${i} &rarr; Point ${i + 1}<br><small>${GPS.formatDistance(segDist, useMetric)}</small></span>`;
+      segmentsList.appendChild(li);
+    }
   }
-  document.getElementById('route-details-total').textContent = `Total: ${GPS.formatDistance(total, useMetric)} across ${route.points.length} points`;
+
+  document.getElementById('route-details-total').textContent =
+    `Total: ${GPS.formatDistance(total, useMetric)} across ${route.points.length} points`;
 }
 
 document.getElementById('btn-route-details-rename').onclick = async () => {
@@ -2969,13 +3188,14 @@ document.getElementById('btn-route-details-rename').onclick = async () => {
   // askName/askConfirm open their own overlay, which hides this sheet -
   // reopen it afterward either way (with fresh data on success, unchanged
   // on cancel) since openOverlay doesn't restore whatever was open before it.
-  const newName = await askName('Rename route', routeDetailsContext.name);
+  const newName = await askName(routeDetailsKind === 'track' ? 'Rename track' : 'Rename route', routeDetailsContext.name);
   if (newName === null) { openOverlay('sheet-route-details'); return; }
   try {
     const updated = { ...routeDetailsContext, name: newName };
-    await Store.saveRoute(updated);
+    if (routeDetailsKind === 'track') await Store.saveTrack(updated);
+    else await Store.saveRoute(updated);
     routeDetailsContext = updated;
-    logInfo(`Route renamed to "${newName}".`);
+    logInfo(`${routeDetailsKind === 'track' ? 'Track' : 'Route'} renamed to "${newName}".`);
     await redrawAllDataFromStore();
     renderRouteDetailsSheet(updated);
     openOverlay('sheet-route-details');
@@ -2999,13 +3219,21 @@ async function unbindFlagsFromRoute(routeId) {
 document.getElementById('btn-route-details-delete').onclick = async () => {
   if (!routeDetailsContext) return;
   const route = routeDetailsContext;
-  const ok = await askConfirm('Delete route?', `Delete saved route "${route.name}"?`);
+  const isTrack = routeDetailsKind === 'track';
+  const ok = await askConfirm(isTrack ? 'Delete track?' : 'Delete route?',
+    isTrack ? `Delete recorded track "${route.name}"? This can't be undone.` : `Delete saved route "${route.name}"?`);
   if (!ok) { openOverlay('sheet-route-details'); return; }
   try {
-    await unbindFlagsFromRoute(route.id);
-    await Store.deleteRoute(route.id);
-    if (nearbyRouteForSuggestion && nearbyRouteForSuggestion.route.id === route.id) hideNavSuggestion(); // don't leave a Start-navigating button pointed at a route that's gone
-    logInfo(`Route "${route.name}" deleted.`);
+    if (isTrack) {
+      await Store.deleteTrack(route.id);
+    } else {
+      // Flags bind to routes only, and a navigation suggestion can only point
+      // at a route, so neither applies to a track.
+      await unbindFlagsFromRoute(route.id);
+      await Store.deleteRoute(route.id);
+      if (nearbyRouteForSuggestion && nearbyRouteForSuggestion.route.id === route.id) hideNavSuggestion();
+    }
+    logInfo(`${isTrack ? 'Track' : 'Route'} "${route.name}" deleted.`);
     routeDetailsContext = null;
     await redrawAllDataFromStore();
     renderDataPanel();
@@ -3639,9 +3867,102 @@ let trackRejectedCount = 0;
 const RECORD_MAX_ACCURACY_M = 100;   // beyond this the fix is nearly meaningless
 const RECORD_MAX_SPEED_MPS = 45;     // ~160 km/h; anything faster is a GPS teleport, not travel
 
+// The record button can live in two places: inside the collapsible menu, or
+// pinned to the stack so it survives the menu closing. It is MOVED rather than
+// duplicated, because two buttons with the same id would break every
+// getElementById in this file, and a CSS-only approach cannot work: the menu
+// hides with display:none on the container, which takes its children with it
+// regardless of what they are styled to do.
+function updateRecordButtonPlacement() {
+  const btn = document.getElementById('btn-record');
+  const menu = document.getElementById('fab-menu-items');
+  const stack = document.getElementById('btn-fab-menu').parentElement;
+  if (!btn || !menu || !stack) return;
+  const alwaysOn = localStorage.getItem('persistentRecord') === 'true';
+  // While recording it is pinned regardless of the setting: stopping needs to
+  // be reachable in one tap, not three.
+  const shouldPin = alwaysOn || recording;
+  const pinned = btn.parentElement === stack;
+  if (shouldPin && !pinned) stack.insertBefore(btn, document.getElementById('btn-fab-menu'));
+  else if (!shouldPin && pinned) menu.appendChild(btn);
+  btn.classList.toggle('pinned', shouldPin);
+}
+
 document.getElementById('btn-record').onclick = () => {
-  if (recording) stopRecordingFlow();
+  if (recording) openStopRecordDialog();
   else openDialog('dialog-start-record');
+};
+
+// Opening this dialog does NOT stop the recording. Nothing is torn down until
+// Save or Delete is chosen, which is what makes Keep recording safe: there is
+// no state to put back, because none was taken apart. The previous version
+// stopped first and asked afterwards, so cancelling had to correctly restore
+// five separate things and any miss left the user recording invisibly.
+function openStopRecordDialog() {
+  const mins = Math.max(0, Math.round((Date.now() - trackStart) / 60000));
+  document.getElementById('stop-record-summary').textContent =
+    `${trackPoints.length} point(s) recorded over ${mins} minute(s), ${GPS.formatDistance(trackDistanceMiles, useMetric)}.`;
+  openDialog('dialog-stop-record');
+  // A backdrop tap is the least destructive outcome, which here means carrying
+  // on recording.
+  dialogDismissHandlers.set('dialog-stop-record', () => closeOverlay('dialog-stop-record'));
+}
+
+document.getElementById('btn-stop-record-cancel').onclick = () => closeOverlay('dialog-stop-record');
+
+document.getElementById('btn-stop-record-save').onclick = async () => {
+  closeOverlay('dialog-stop-record');
+  // Read now rather than when the dialog opened: the user was still recording
+  // the whole time it was on screen, so those points belong to the track.
+  const points = trackPoints.slice();
+  const startedAt = trackStart;
+  endRecording();
+  if (points.length < 2) {
+    await showAlert('Nothing to save', 'This track has fewer than two points, so there is no path to save.');
+    return;
+  }
+  const name = await askName('Name this track', new Date().toLocaleDateString());
+  // Cancelling the NAME prompt no longer discards anything. It used to, which
+  // meant a routine cancel silently destroyed hours of walking; the track is
+  // saved under a default name instead and can be renamed or deleted later.
+  const finalName = name === null ? `Track ${new Date().toLocaleString()}` : name;
+  try {
+    await Store.saveTrack({ name: finalName, points, startedAt, endedAt: Date.now() });
+    await redrawAllDataFromStore();
+    renderDataPanel();
+    logInfo(`Track "${finalName}" saved with ${points.length} points.`);
+    showToast(`Track saved: ${finalName}`);
+  } catch (e) {
+    logError(`Failed to save track: ${e.message}`);
+    await showAlert('Could not save track', e.message);
+  }
+};
+
+document.getElementById('btn-stop-record-delete').onclick = async () => {
+  closeOverlay('dialog-stop-record');
+  const count = trackPoints.length;
+  const ok = await askConfirm('Delete this track?',
+    `Discard ${count} recorded point(s)? This can't be undone, and the recording will stop.`);
+  if (!ok) {
+    // Declining the delete leaves the recording running, same as Keep
+    // recording, because nothing has been torn down at this point either.
+    return;
+  }
+  endRecording();
+  logInfo(`Recording discarded (${count} points).`);
+  showToast('Recording discarded.');
+};
+
+const persistRecordToggle = document.getElementById('toggle-persistent-record');
+persistRecordToggle.checked = localStorage.getItem('persistentRecord') === 'true';
+persistRecordToggle.addEventListener('change', () => {
+  localStorage.setItem('persistentRecord', persistRecordToggle.checked ? 'true' : 'false');
+  updateRecordButtonPlacement();
+});
+updateRecordButtonPlacement();
+
+document.getElementById('btn-support').onclick = () => {
+  window.open('https://ko-fi.com/corruptedwizards', '_blank', 'noopener');
 };
 document.getElementById('btn-start-record-yes').onclick = () => { closeOverlay('dialog-start-record'); startRecording(); };
 document.getElementById('btn-start-record-no').onclick = () => closeOverlay('dialog-start-record');
@@ -3659,6 +3980,7 @@ function startRecording() {
   btn.classList.add('recording');
   btn.innerHTML = ICONS.stop;
   document.getElementById('record-status-pill').classList.remove('hidden');
+  updateRecordButtonPlacement();
   logInfo('Track recording started.');
 }
 
@@ -3703,25 +4025,20 @@ function recordPoint(pos) {
   document.getElementById('record-stats').textContent = `${GPS.formatDistance(trackDistanceMiles, useMetric)} · ${mm}:${ss}`;
 }
 
-async function stopRecordingFlow() {
+// Teardown only. Deliberately separate from saving, so Save and Delete can
+// each call it at the right moment and Cancel never does.
+function endRecording() {
   recording = false;
   const btn = document.getElementById('btn-record');
   btn.classList.remove('recording');
   btn.innerHTML = ICONS.record;
   document.getElementById('record-status-pill').classList.add('hidden');
+  updateRecordButtonPlacement();
   if (trackLine) { map.removeLayer(trackLine); trackLine = null; }
-
   if (trackRejectedCount) logInfo(`${trackRejectedCount} unusable GPS fix(es) were left out of this track.`);
-  if (trackPoints.length < 2) { logInfo('Recording stopped - not enough points to save.'); return; }
-  const name = await askName('Name this track', new Date().toLocaleDateString());
-  if (name === null) { logInfo('Track discarded.'); return; }
-  try {
-    await Store.saveTrack({ name, points: trackPoints, startedAt: trackStart, endedAt: Date.now() });
-    await redrawAllDataFromStore();
-    logInfo(`Track "${name}" saved with ${trackPoints.length} points.`);
-  } catch (e) {
-    logError(`Failed to save track: ${e.message}`);
-  }
+  trackPoints = [];
+  trackDistanceMiles = 0;
+  trackRejectedCount = 0;
 }
 
 // ---------- Region download ----------
@@ -4019,6 +4336,8 @@ function renderTrimPreview() {
   document.getElementById('trim-route-end-out').textContent = trimLabel(endM);
   document.getElementById('trim-route-summary').textContent =
     `${GPS.formatDistance(keptMiles, useMetric)} of ${GPS.formatDistance(trimContext.totalMiles, useMetric)} kept, ${kept.length} of ${route.points.length} points.`;
+  document.querySelector('#panel-trim-route .float-panel-title').textContent =
+    trimContext.kind === 'track' ? 'Trim track' : 'Trim route';
 
   // Bound flags are the non-obvious casualty of a trim: their distance along
   // the route shifts, and any that sat on a removed section are no longer on
@@ -4037,19 +4356,22 @@ function renderTrimPreview() {
   document.getElementById('btn-trim-route-save').disabled = kept.length < 2;
 }
 
-async function openTrimRouteDialog(route) {
+// kind is 'route' or 'track'. The geometry is identical; what differs is
+// which store the result is written back to and whether bound flags exist to
+// worry about. Flags bind to routes only, so a track trim has none.
+async function openTrimRouteDialog(route, kind = 'route') {
   const points = route.points || [];
   if (points.length < 3) {
-    await showAlert('Too short to trim', 'This route needs more than two points before it can be trimmed.');
+    await showAlert('Too short to trim', `This ${kind} needs more than two points before it can be trimmed.`);
     return;
   }
   const cum = cumulativeMiles(points);
   const totalMiles = cum[cum.length - 1];
   const totalMetres = Math.floor(totalMiles * 1609.344);
-  const allFlags = await Store.getWaypoints();
+  const allFlags = kind === 'route' ? await Store.getWaypoints() : [];
 
   trimContext = {
-    route, cum, totalMiles,
+    route, kind, cum, totalMiles,
     boundFlags: allFlags.filter(w => w.boundRouteId === route.id)
   };
 
@@ -4105,13 +4427,17 @@ document.getElementById('btn-trim-route-save').onclick = async () => {
 
   const kept = slicedRoutePoints(route.points, cum, startM, endM);
   if (kept.length < 2) return;
+  const kind = trimContext.kind;
 
-  const ok = await askConfirm('Trim this route?',
-    `The route will be shortened to ${GPS.formatDistance(cumulativeMiles(kept).pop() || 0, useMetric)}. The removed sections can't be recovered.`);
+  const ok = await askConfirm(`Trim this ${kind}?`,
+    `The ${kind} will be shortened to ${GPS.formatDistance(cumulativeMiles(kept).pop() || 0, useMetric)}. The removed sections can't be recovered.`);
   if (!ok) return;
 
   try {
-    await Store.saveRoute({ ...route, points: kept });
+    // slicedRoutePoints returns a slice of the original array, so a track's
+    // per-point altitude and timestamp survive untouched; only the ends go.
+    if (kind === 'track') await Store.saveTrack({ ...route, points: kept });
+    else await Store.saveRoute({ ...route, points: kept });
 
     // Every bound flag's distance along the route is measured from the old
     // start, so all of them are stale after a trim, not just the ones on a
@@ -4136,10 +4462,11 @@ document.getElementById('btn-trim-route-save').onclick = async () => {
     await redrawAllDataFromStore();
     renderDataPanel();
     const extra = unbound ? ` ${unbound} flag(s) unbound, ${rebound} kept.` : '';
-    logInfo(`Route "${route.name}" trimmed to ${kept.length} points.${extra}`);
-    showToast(`Route trimmed.${extra}`);
+    const label = kind === 'track' ? 'Track' : 'Route';
+    logInfo(`${label} "${route.name}" trimmed to ${kept.length} points.${extra}`);
+    showToast(`${label} trimmed.${extra}`);
   } catch (e) {
-    logError(`Could not trim route: ${e.message}`);
+    logError(`Could not trim ${kind}: ${e.message}`);
     await showAlert('Trim failed', e.message);
   }
 };
@@ -4514,6 +4841,17 @@ document.getElementById('btn-save-session').onclick = async () => {
 };
 
 document.getElementById('btn-new-session').onclick = async () => {
+  // Dealt with first, and separately. Clearing the session used to call the
+  // old save-and-stop function, which would have prompted for a name in the
+  // middle of a different flow; now that saving and stopping are split, doing
+  // nothing here would silently bin an in-progress recording instead. Neither
+  // is acceptable, so the recording has to be resolved on its own terms
+  // before the session is touched at all.
+  if (recording) {
+    await showAlert('Still recording',
+      'Stop the track recording first, choosing whether to save or discard it, then start the new session.');
+    return;
+  }
   const hasData = await Store.hasAnyCurrentData();
   if (hasData) {
     const ok = await askConfirm('Start new session?', 'You have unsaved flags, routes, or tracks. Starting a new session will clear them (downloaded map data is never affected). Save first from this menu if you want to keep them.');
@@ -4529,7 +4867,6 @@ document.getElementById('btn-new-session').onclick = async () => {
     Mirror.setActiveSession(null);
     await Storage.clearCurrentFolder();
     cancelRoutePlanning();
-    if (recording) await stopRecordingFlow();
     setFlagMode(false);
     logInfo('New session started.');
     renderDataPanel();

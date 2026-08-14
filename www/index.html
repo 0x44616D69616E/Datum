@@ -175,7 +175,7 @@
       <p class="hint">Your waypoints, routes and tracks are written to your storage folder as GPX automatically as you create them, so there is nothing to export for a backup. They live in <b>current/</b> until you save a session, then move into that session's own folder.</p>
       <p class="hint">GPX is the standard outdoor format, so those files open in Garmin, Gaia GPS, CalTopo, OsmAnd and most handheld units. To bring a file in, drop it into <b>current/waypoints</b>, <b>current/routes</b> or <b>current/tracks</b> and use Import, or just tap the file and choose Datum.</p>
       <label class="check-row">
-        <input type="checkbox" id="share-include-timestamps" checked />
+        <input type="checkbox" id="share-include-timestamps" />
         <span>Include times<br><small>A path alone shows where a trail goes. Times also reveal when you were out.</small></span>
       </label>
       <label class="check-row">
@@ -231,7 +231,7 @@
       <button id="btn-route-details-delete" class="btn-danger">Delete</button>
     </div>
     <button id="btn-route-details-navigate" class="btn-primary full-width">Start navigation</button>
-    <h3>Segments</h3>
+    <h3 id="route-details-segments-title">Segments</h3>
     <ul id="route-details-segments" class="data-list"></ul>
   </div>
 </div>
@@ -241,6 +241,17 @@
   <div class="sheet-handle"></div>
   <div class="sheet-header"><h2>Settings</h2><button class="icon-btn sheet-close" data-target="sheet-settings" data-icon="close"></button></div>
   <div class="sheet-body">
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-title">Liquid glass theme</div>
+        <div class="hint">Panels, menus, and popups become translucent so the map stays visible behind them. Turn off for the solid Classic look, which is easier to read in bright sun and slightly lighter on the battery.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-glass-theme" />
+        <span class="switch-track"></span>
+      </label>
+    </div>
+
     <div class="toggle-row">
       <div>
         <div class="toggle-title">Metric units</div>
@@ -265,7 +276,7 @@
 
     <div class="toggle-row">
       <div>
-        <div class="toggle-title">Show compass <span class="beta-badge">BETA</span></div>
+        <div class="toggle-title">Show compass</div>
         <div class="hint">Heading ribbon below the search bar, driven by the device's compass sensor. Off by default while it's still being refined.</div>
       </div>
       <label class="switch">
@@ -281,6 +292,17 @@
       </div>
       <label class="switch">
         <input type="checkbox" id="toggle-hide-scale-bar" />
+        <span class="switch-track"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-title">Record button always on screen</div>
+        <div class="hint">Keeps the track recording button visible even when the menu is closed, so you can start and stop without opening anything. It stays visible while recording regardless of this setting.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-persistent-record" />
         <span class="switch-track"></span>
       </label>
     </div>
@@ -309,9 +331,14 @@
       </div>
     </div>
 
-    <p class="hint" style="margin-top:18px; border-top:1px solid var(--border-soft); padding-top:14px;">
-      Datum is developed by 0x44616D69616E.
-    </p>
+    <div class="data-section">
+      <h3>About Datum</h3>
+      <p class="hint">A fully offline topo, satellite, and trail map. Free, open source under the MIT licence, with no account, no ads, and nothing sent anywhere.</p>
+      <p class="hint">Built by <a href="https://github.com/0x44616D69616E" target="_blank" rel="noopener noreferrer">0x44616D69616E</a> &middot; <a href="https://github.com/0x44616D69616E/Datum" target="_blank" rel="noopener noreferrer">Source on GitHub</a></p>
+      <p class="hint">Map data: USGS The National Map, OpenTopoMap (CC-BY-SA), Esri, Maxar, Earthstar Geographics, Waymarked Trails, OpenStreetMap contributors, BLM Surface Management Agency, RainViewer, US Census Bureau, Natural Earth.</p>
+      <button id="btn-support" class="btn-secondary full-width">Support Datum on Ko-fi</button>
+      <p class="hint">Datum is free and stays free. Bug reports and feature requests through GitHub Issues are just as valuable.</p>
+    </div>
   </div>
 </div>
 
@@ -419,6 +446,19 @@
 </div>
 
 <!-- Start-recording confirm dialog -->
+<!-- Stop-recording dialog. Three outcomes, and opening it does not interrupt
+     the recording: only Save and Delete end it. -->
+<div id="dialog-stop-record" class="dialog hidden">
+  <h2>Stop recording?</h2>
+  <p class="hint" id="stop-record-summary"></p>
+  <p class="hint">Still recording. Nothing changes unless you choose Save or Delete.</p>
+  <div class="dialog-actions dialog-actions-stacked">
+    <button id="btn-stop-record-save" class="btn-primary full-width">Save track</button>
+    <button id="btn-stop-record-delete" class="btn-danger full-width">Delete track</button>
+    <button id="btn-stop-record-cancel" class="btn-secondary full-width">Keep recording</button>
+  </div>
+</div>
+
 <div id="dialog-start-record" class="dialog hidden">
   <h2>Start recording a track?</h2>
   <p class="hint">Your GPS path will be logged until you stop.</p>
