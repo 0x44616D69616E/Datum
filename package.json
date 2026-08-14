@@ -1,6 +1,6 @@
 {
   "name": "datum",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Datum - a fully offline GIS-style topo/satellite/trail map with GPS, waypoints, and route recording",
   "scripts": {
     "sync": "npx cap sync android",
