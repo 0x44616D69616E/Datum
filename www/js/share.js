@@ -250,6 +250,116 @@ export async function findCollisions() {
   return collisions;
 }
 
+// ---------------------------------------------------------------------------
+// Filesystem to database: adopting files that were put there by hand
+// ---------------------------------------------------------------------------
+//
+// The mirror only runs one way, database to files, so anything dropped into the
+// Datum folder from outside is invisible until it is deliberately adopted. This
+// is that deliberate step, and it covers two cases:
+//
+//   files added to a session folder that already exists, and
+//   a whole session folder copied in, which becomes a new session
+//
+// Records already in the database are recognised by id and skipped, so running
+// this repeatedly does nothing on a folder Datum wrote itself.
+
+export async function scanForUnknownFiles() {
+  const index = await buildExistingIndex();
+  const knownSessions = new Set((await Store.getSessions()).map(s => s.id));
+  const result = { newSessionFolders: [], newRecords: [], errors: [] };
+
+  const collectFrom = (dir, label) => (async () => {
+    const found = [];
+    for (const folder of Storage.RECORD_FOLDERS) {
+      for (const filename of await Storage.listRecordFiles(dir, folder, GPX_EXTENSION)) {
+        try {
+          const parsed = parseGpx(await Storage.readRecordFile(dir, folder, filename));
+          for (const [type, records] of [['waypoints', parsed.waypoints], ['routes', parsed.routes], ['tracks', parsed.tracks]]) {
+            for (const r of records) {
+              // No id means it came from another application, which is new by
+              // definition. A known id is something Datum already has.
+              if (r.sourceId && index[type].has(r.sourceId)) continue;
+              found.push({ type, record: r, filename, label, dir, folder });
+            }
+          }
+        } catch (e) {
+          result.errors.push(`${label}/${folder}/${filename}: ${e.message}`);
+        }
+      }
+    }
+    return found;
+  })();
+
+  result.newRecords.push(...await collectFrom(Storage.currentDir(), 'current'));
+
+  for (const id of await Storage.listSessionFolders()) {
+    const dir = Storage.sessionDir(id);
+    const records = await collectFrom(dir, id);
+    if (!knownSessions.has(id)) {
+      // A folder with no matching session record is one somebody copied in.
+      result.newSessionFolders.push({ id, dir, records });
+    } else {
+      result.newRecords.push(...records);
+    }
+  }
+  return result;
+}
+
+// Turns a copied-in folder into a real session. The folder name is reused as
+// the session id so the mirror keeps writing to the same place rather than
+// creating a duplicate folder alongside it.
+export async function adoptSessionFolder(entry) {
+  const waypoints = [], routes = [], tracks = [];
+  for (const item of entry.records) {
+    const { sourceId, sourceBoundRouteId, ...record } = item.record;
+    if (item.type === 'waypoints') waypoints.push({ ...record, id: sourceId || undefined });
+    else if (item.type === 'routes') routes.push({ ...record, id: sourceId || undefined });
+    else tracks.push({ ...record, id: sourceId || undefined });
+  }
+  await Store.putSession({
+    id: entry.id,
+    // Derived from the folder name, which carries the original session name
+    // after its timestamp prefix.
+    name: entry.id.replace(/^\d{8}T\d{6}-?/, '').replace(/-/g, ' ') || entry.id,
+    waypoints, routes, tracks,
+    savedAt: Date.now()
+  });
+  return { waypoints: waypoints.length, routes: routes.length, tracks: tracks.length };
+}
+
+// Adds loose records found in current/ or an existing session's folders into
+// the working database.
+export async function adoptLooseRecords(records) {
+  let added = 0, bindingsRestored = 0, bindingsDropped = 0;
+  const routeIdBySourceId = new Map();
+  // Routes first, so a waypoint that binds to one saved in the same pass finds
+  // its new id rather than being written unbound.
+  for (const item of records.filter(r => r.type === 'routes')) {
+    const { sourceId, ...record } = item.record;
+    const saved = await Store.saveRoute({ ...record, id: null });
+    if (sourceId) routeIdBySourceId.set(sourceId, saved.id);
+    added++;
+  }
+  for (const item of records.filter(r => r.type === 'waypoints')) {
+    const { sourceId, sourceBoundRouteId, ...record } = item.record;
+    const newRouteId = sourceBoundRouteId ? routeIdBySourceId.get(sourceBoundRouteId) : null;
+    if (sourceBoundRouteId) { if (newRouteId) bindingsRestored++; else bindingsDropped++; }
+    await Store.saveWaypoint({
+      ...record, id: null,
+      boundRouteId: newRouteId || null,
+      routeDistance: newRouteId ? record.routeDistance : null
+    });
+    added++;
+  }
+  for (const item of records.filter(r => r.type === 'tracks')) {
+    const { sourceId, ...record } = item.record;
+    await Store.saveTrack({ ...record, id: null });
+    added++;
+  }
+  return { added, bindingsRestored, bindingsDropped };
+}
+
 // Scans every folder a GPX can legitimately live in and imports what it finds.
 // Re-importing files the mirror itself wrote is expected and harmless: id
 // matching makes it a no-op rather than a duplication event.
