@@ -6,7 +6,7 @@ Datum works entirely offline once you've downloaded a region: satellite imagery,
 
 No account. No analytics. Nothing you record is uploaded anywhere. Your waypoints, routes, and tracks are written to a folder on your own device as standard GPX files, which means they're yours to open in other apps, back up, or share, and they never go anywhere you don't send them.
 
-### [Download Datum v1.3.0 for Android](https://github.com/0x44616D69616E/Datum/releases/download/v1.3.0/datum-1.3.0.apk)
+### [Download Datum v1.4.0 for Android](https://github.com/0x44616D69616E/Datum/releases/download/v1.4.0/datum-1.4.0.apk)
 
 Free, no ads, no account, no subscription, no tracking. 6.4 MB.
 [All releases](https://github.com/0x44616D69616E/Datum/releases) · [Installation help](https://freemaps.org)
@@ -71,37 +71,29 @@ True-north compass needle, tap to reset rotation. Optional heading ribbon driven
 
 Datum is MIT licensed and free. There is no sign-up, no subscription, no analytics SDK, and no server that could collect anything even if it wanted to. It was written because good offline mapping shouldn't cost a monthly fee.
 
-## What's new in 1.3.0
+## What's new in 1.4.0
+
+### Added
+
+- **Liquid glass theme**, an optional translucent look that keeps the map visible behind panels and menus. Off by default; toggle it in Settings.
+- **Record button can stay on screen** with the menu closed, so a recording starts and stops in one tap.
+- **Recorded tracks now have the same options as plotted routes**: More, Trim and Delete, plus a details summary showing duration, average pace and elevation gain.
+- **Bottom sheets can be pulled down** by their handle to peek at the map, and flicked down to close.
+- **About section in Settings**, with a source link and a way to support the project.
 
 ### Changed
 
-- **Sessions now work as containers.** Loading a session shows only that session's waypoints, routes, and tracks; everything else is hidden until you switch back. Previously every record was on the map all the time. Unsaved work lives in a `current` session until you name and save it.
-
-### New
-
-- **Your data is saved as standard GPX**, automatically, as you create it. Files open in Gaia GPS, CalTopo, OsmAnd, Garmin devices, and most other outdoor apps. Files from those apps import back into Datum.
-- **Datum appears in the "open with" list for GPX files**, so a route someone sends you opens straight from your file manager, email, or messages.
-- **USGS Topo layer**, plus a **USGS hybrid** preset. Contours read in feet at hiking zoom, unlike OpenTopoMap which labels in metres.
-- **A session tree in the Data sheet**, expandable by session and record type, with a select mode for deleting several items at once. This is also the first place recorded tracks can be inspected, renamed, or deleted at all.
-- **Route trimming.** Tap a route, choose Trim, and shorten it from either end with a live preview on the map.
-- **Delete straight from the route popup**, without going through the Data sheet.
-- **Export privacy options** for leaving out timestamps and trimming the ends of tracks, which often start at home.
-- **Layer presets are shareable files** containing layer settings only, with no locations in them.
+- **Timestamps are left out of shared files by default.** A path alone shows where a trail goes; timestamps also show what hours you were out.
+- **Export options are remembered** between launches.
+- **Stopping a recording asks what to do with it**, offering save, delete, or keep recording. Tapping the button no longer stops the recording by itself.
 
 ### Fixed
 
-- GPS resync no longer gets stuck showing "Resyncing" indefinitely.
-- The GPS status panel updates live while open, instead of freezing at whatever it showed when opened.
-- Confirmation prompts no longer close the panel they were opened from.
-- Elevation reads in feet or metres instead of being converted to miles. A 7,500 ft summit displayed as "1.42 mi".
-- Rotating the map now loads the tiles the rotation exposes, instead of leaving blank edges until you zoomed.
-- Offline downloads no longer request tiles that don't exist at the chosen zoom. On a large multi-layer download this was most of the requests, making downloads far slower than necessary while still reporting success.
-- Flags bound to a route can be unbound. The Bind and Unbind buttons existed but were invisible, so neither had ever worked.
-- Dropping a flag onto a route binds it consistently at any zoom level.
-- Storage works with no setup, defaulting to `Documents/Datum`.
-- Restoring a backup no longer loses your saved sessions.
+- **Cancelling the "name this track" prompt no longer deletes the recording.** It previously discarded the track with no warning.
+- **Starting a new session while recording no longer discards the track.**
+- Sheets slide open and closed instead of appearing instantly.
 
-Older releases are listed under [Releases](https://github.com/0x44616D69616E/Datum/releases).
+Full history is in [CHANGELOG.md](CHANGELOG.md), and older releases are listed under [Releases](https://github.com/0x44616D69616E/Datum/releases).
 
 ## Where your data lives
 
@@ -215,7 +207,7 @@ The data layer runs one way on purpose: IndexedDB is authoritative and the folde
 
 ## Installing the APK
 
-**[Download Datum v1.3.0](https://github.com/0x44616D69616E/Datum/releases/download/v1.3.0/datum-1.3.0.apk)**, or browse [all releases](https://github.com/0x44616D69616E/Datum/releases).
+**[Download Datum v1.4.0](https://github.com/0x44616D69616E/Datum/releases/download/v1.4.0/datum-1.4.0.apk)**, or browse [all releases](https://github.com/0x44616D69616E/Datum/releases).
 
 Datum isn't distributed through the Play Store, so Android shows two separate warnings the first time you install it:
 
