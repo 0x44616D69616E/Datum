@@ -60,6 +60,29 @@ export async function requestAllFilesAccess() {
 
 // ---------- Real folder browsing, once All Files Access is granted -
 // lists real subfolders under the external storage root. ----------
+// Folders and matching files together, for the import browser. Separate from
+// listFolders so the storage-location picker keeps showing only directories,
+// where a file would just be noise.
+export async function listEntries(relativePath, extension) {
+  if (!CapFilesystem) throw new Error('Filesystem access is not available in this environment.');
+  const res = await CapFilesystem.readdir({ path: relativePath, directory: 'EXTERNAL_STORAGE' });
+  const folders = res.files.filter(f => f.type === 'directory').map(f => f.name).sort((a, b) => a.localeCompare(b));
+  const files = res.files
+    .filter(f => f.type !== 'directory')
+    .map(f => f.name)
+    .filter(n => !extension || n.toLowerCase().endsWith(extension))
+    .sort((a, b) => a.localeCompare(b));
+  return { folders, files };
+}
+
+// Reads a file from anywhere on external storage, by path relative to its
+// root. Used by the import browser, which can wander outside Datum's folders.
+export async function readExternalPath(relativePath) {
+  if (!CapFilesystem) throw new Error('Filesystem access is not available in this environment.');
+  const res = await CapFilesystem.readFile({ path: relativePath, directory: 'EXTERNAL_STORAGE', encoding: 'utf8' });
+  return res.data;
+}
+
 export async function listFolders(relativePath) {
   if (!CapFilesystem) throw new Error('Filesystem access is not available in this environment.');
   const res = await CapFilesystem.readdir({ path: relativePath, directory: 'EXTERNAL_STORAGE' });
@@ -377,6 +400,56 @@ export async function deleteSessionFolder(id) {
   }
   await deleteTreeUnchecked(target);
   return true;
+}
+
+// Removes everything under the Datum folder, including the folder itself.
+//
+// This is the most destructive filesystem operation in the app, and its risk
+// profile is different from the session delete: there the danger was a
+// malformed id resolving one level too high, here the target IS the top level,
+// so the guard has to be that the path is exactly the configured Datum folder
+// and not the storage root it sits in.
+//
+// The specific failure this prevents: getConfiguredRelativePath() returning
+// empty and STORAGE_DIR being blank for any reason would make backupDir()
+// resolve to '', which as a delete target is the entire external storage.
+export async function deleteEverything() {
+  if (!CapFilesystem || !isStorageConfigured()) return 0;
+  const dir = backupDir(getConfiguredRelativePath());
+  const segments = dir.split('/').filter(Boolean);
+  // Must end with the Datum folder name and have at least that one segment.
+  if (!segments.length || segments[segments.length - 1] !== STORAGE_DIR) {
+    throw new Error(`Refusing to delete: "${dir}" is not the Datum folder`);
+  }
+  const count = await countFilesUnder(dir);
+  await deleteTreeUnchecked(dir);
+  return count;
+}
+
+// Counts what deleteEverything would remove, so the confirmation can state it.
+export async function countEverything() {
+  if (!CapFilesystem || !isStorageConfigured()) return { files: 0, sessions: 0 };
+  const dir = backupDir(getConfiguredRelativePath());
+  return { files: await countFilesUnder(dir), sessions: (await listSessionFolders()).length };
+}
+
+// Every settings and metadata key the app writes. Listed explicitly rather
+// than clearing localStorage wholesale, because that would also wipe anything
+// the WebView or a future library stores under its own keys, which is not
+// ours to delete.
+export const SETTINGS_KEYS = [
+  'glassTheme', 'useMetricUnits', 'leftHanded', 'showCompassRibbon',
+  'hideScaleBar', 'persistentRecord', 'debugMode', 'onboardingSeen',
+  'compassNorthOffset', 'layerStack', 'layerPresets', 'savedRegions',
+  'shareIncludeTimestamps', 'shareTrimEnabled', 'shareTrimStartMetres',
+  'shareTrimEndMetres', 'mirrorPending',
+  // Storage configuration goes last conceptually: clearing it returns the app
+  // to its first-run state, which is the point of a full wipe.
+  'storageConfigured', 'storageDirectory', 'storageRelativePath'
+];
+
+export function clearAllSettings() {
+  for (const k of SETTINGS_KEYS) localStorage.removeItem(k);
 }
 
 // Empties the live session folder without removing it. Deliberately a separate

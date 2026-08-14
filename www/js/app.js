@@ -12,6 +12,7 @@ import { logInfo, logError, setDebugEnabled, isDebugEnabled } from './debugOverl
 import { mountIcons, ICONS, FLAG_TYPES } from './icons.js';
 import * as Storage from './storage.js';
 import * as Share from './share.js';
+import * as Formats from './formats/gpx.js';
 import * as Mirror from './mirror.js';
 
 mountIcons();
@@ -1442,6 +1443,78 @@ document.getElementById('btn-load-presets-from-folder').onclick = async () => {
 // ---------- Filesystem mirror ----------
 Mirror.startMirroring();
 
+// Storage health. A failed mirror write means a record the user believes is
+// safely on disk is not, so it is surfaced on the map itself rather than only
+// in a menu they might not open for days.
+function renderStorageHealth(count) {
+  const n = typeof count === 'number' ? count : Mirror.getPendingCount();
+  // Both the menu button and the data button, because the menu is usually
+  // closed: without the outer one the warning would be invisible until the
+  // user happened to open the menu for some other reason.
+  for (const id of ['btn-fab-menu', 'btn-data']) {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('has-storage-error', n > 0);
+  }
+  const alert = document.getElementById('storage-alert');
+  if (alert) {
+    alert.classList.toggle('hidden', n === 0);
+    if (n > 0) {
+      const items = Mirror.getPendingWrites();
+      const names = items.slice(0, 3).map(p => p.name || p.id).join(', ');
+      const more = items.length > 3 ? `, and ${items.length - 3} more` : '';
+      document.getElementById('storage-alert-detail').textContent =
+        `${n} item(s) are in Datum but were not written to your storage folder: ${names}${more}. `
+        + 'They are safe in the app, but will not be in your files or backups until this succeeds.';
+    }
+  }
+}
+Mirror.onMirrorHealthChange(renderStorageHealth);
+renderStorageHealth();
+
+document.getElementById('btn-storage-permissions').onclick = async () => {
+  // Opens Android's all-files-access screen for Datum directly. The plugin
+  // already exists for the first-run permission prompt, so this is the same
+  // path rather than a second mechanism.
+  if (!Storage.isAllFilesAccessPluginAvailable()) {
+    await showAlert('Not available', 'Open Android Settings, find Datum under Apps, and check its storage permissions.');
+    return;
+  }
+  try {
+    await Storage.requestAllFilesAccess();
+    showToast('Grant storage access, then come back and tap Try again.');
+  } catch (e) {
+    logError(`Could not open permission settings: ${e.message}`);
+    await showAlert('Could not open settings', 'Open Android Settings, find Datum under Apps, and check its storage permissions.');
+  }
+};
+
+document.getElementById('btn-storage-retry').onclick = async () => {
+  const btn = document.getElementById('btn-storage-retry');
+  btn.disabled = true;
+  btn.textContent = 'Trying...';
+  try {
+    // Recreated first: the usual cause is a folder that went away, and
+    // retrying writes into a directory that still does not exist would fail
+    // for the same reason every time.
+    await Storage.ensureStorageRoot();
+    const { fixed, failed } = await Mirror.retryPendingWrites();
+    renderStorageHealth();
+    if (failed === 0) {
+      showToast(`${fixed} file(s) written. Storage is up to date.`);
+      logInfo(`Storage retry: ${fixed} written, none outstanding.`);
+    } else {
+      await showAlert('Still failing',
+        `${fixed} written, ${failed} still could not be saved. Check that the storage folder in Settings still exists and that Datum has permission to write to it.`);
+    }
+  } catch (e) {
+    logError(`Storage retry failed: ${e.message}`);
+    await showAlert('Retry failed', e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Try again';
+  }
+};
+
 // A loaded session is live, not frozen: edits made while it is active belong
 // to it. Re-snapshotting on every single change would rewrite every record's
 // copy on each keystroke, so it is debounced and coalesced. The delay is short
@@ -1593,57 +1666,372 @@ document.getElementById('btn-tidy-storage').onclick = async () => {
   }
 };
 
-document.getElementById('btn-import-share').onclick = async () => {
-  try {
-    // Created rather than refused, so the folders exist for the user to put
-    // files into. Reading an empty folder reports nothing found, which is
-    // more useful than being told to go and configure something first.
-    await Storage.ensureStorageRoot();
-    // Collisions are found before anything is written, so cancelling here
-    // leaves the database untouched with nothing to roll back.
-    const collisions = await Share.findCollisions();
-    let onCollision = 'skip';
+// ---------- Import browser ----------
+// Reuses the same walking pattern as the storage-folder picker, but selects
+// files rather than directories, so a GPX sitting anywhere on the device can
+// be brought in without first moving it into Datum's own folders by hand.
 
-    if (collisions.length) {
-      // Asked once for the whole run, not per record. A folder import can hit
-      // hundreds of collisions and a dialog each time would be unusable.
-      const sample = collisions.slice(0, 3).map(c => `${c.name} (${c.type.replace(/s$/, '')})`).join(', ');
-      const more = collisions.length > 3 ? `, and ${collisions.length - 3} more` : '';
-      const update = await askConfirm(
-        `${collisions.length} item(s) already exist`,
-        `These files contain items already in Datum: ${sample}${more}.\n\n`
-        + 'Update replaces your copies with the versions in the files. Anything you have changed locally is overwritten and cannot be recovered.\n\n'
-        + 'Skip keeps your copies and imports only what is new.\n\n'
-        + 'Update these items?');
-      onCollision = update ? 'update' : 'skip';
-    } else {
-      // No collisions, so there is nothing to ask about, but import still
-      // writes to the database and should not happen on a single stray tap.
-      const go = await askConfirm('Import from folder?',
-        'Every GPX file in current/ and your session folders will be read. Files Datum wrote itself are recognised and skipped, so nothing is duplicated and nothing you already have is changed.');
-      if (!go) return;
+let importBrowserPath = '';
+
+async function askImportDestination(summary) {
+  document.getElementById('import-destination-summary').textContent = summary;
+  return new Promise((resolve) => {
+    const finish = (value) => {
+      closeOverlay('dialog-import-destination');
+      dialogDismissHandlers.delete('dialog-import-destination');
+      resolve(value);
+    };
+    document.getElementById('btn-import-dest-current').onclick = () => finish('current');
+    document.getElementById('btn-import-dest-new').onclick = () => finish('new');
+    document.getElementById('btn-import-dest-cancel').onclick = () => finish(null);
+    // A backdrop tap resolves as cancel rather than leaving the caller waiting
+    // on a promise that can never settle.
+    dialogDismissHandlers.set('dialog-import-destination', () => resolve(null));
+    openDialog('dialog-import-destination');
+  });
+}
+
+// Saves parsed GPX content either into the working session or as a session of
+// its own, which is the difference between adding a friend's route to today's
+// trip and keeping their whole trip separate from yours.
+async function importParsedInto(parsedList, destination, label) {
+  const all = { waypoints: [], routes: [], tracks: [] };
+  for (const p of parsedList) {
+    all.waypoints.push(...p.waypoints);
+    all.routes.push(...p.routes);
+    all.tracks.push(...p.tracks);
+  }
+  const total = all.waypoints.length + all.routes.length + all.tracks.length;
+  if (!total) {
+    await showAlert('Nothing to import', 'No waypoints, routes or tracks were found in that file.');
+    return;
+  }
+
+  if (destination === 'new') {
+    // Saved directly as a session record rather than loaded into the working
+    // stores, so importing someone else's trip never disturbs your own.
+    const name = await askName('Name this session', label);
+    const finalName = name === null ? label : name;
+    const id = Storage.makeSessionId(finalName);
+    await Store.putSession({
+      id, name: finalName, savedAt: Date.now(),
+      waypoints: all.waypoints.map(w => ({ ...w, id: undefined, boundRouteId: null, routeDistance: null })),
+      routes: all.routes.map(r => ({ ...r, id: undefined })),
+      tracks: all.tracks.map(t => ({ ...t, id: undefined }))
+    });
+    renderDataPanel();
+    logInfo(`Imported ${total} item(s) as new session "${finalName}".`);
+
+    // Offered rather than done automatically. Loading a session replaces
+    // everything currently on the map, so importing someone's route must not
+    // silently take the user's own work off screen.
+    const hasWork = await Store.hasAnyCurrentData();
+    const warning = hasWork
+      ? currentSessionId
+        ? ' Your current session stays saved and you can switch back to it.'
+        : ' You have unsaved work that is not in a session yet, and loading this will clear it from the map.'
+      : '';
+    const loadNow = await askConfirm('Load it now?',
+      `"${finalName}" was added with ${total} item(s).${warning}`);
+    if (!loadNow) {
+      await showAlert('Imported', `"${finalName}" is in your session list whenever you want it.`);
+      return;
+    }
+    // Saving first is the difference between switching sessions and losing
+    // work: unsaved records live only in the working stores, and loading over
+    // them is where they would go.
+    if (hasWork && !currentSessionId) {
+      const save = await askConfirm('Save your current work first?',
+        'Your unsaved flags, routes and tracks will be cleared when this session loads. Save them as a session first?');
+      if (save) {
+        const keepName = await askName('Save current work as', `Session ${new Date().toLocaleDateString()}`);
+        if (keepName !== null) {
+          const keepId = Storage.makeSessionId(keepName);
+          await Store.saveSession(keepName, keepId);
+          logInfo(`Current work saved as "${keepName}" before switching.`);
+        }
+      }
+    }
+    await loadSessionFlow({ id, name: finalName });
+    return;
+  }
+
+  const records = [
+    ...all.routes.map(r => ({ type: 'routes', record: r })),
+    ...all.waypoints.map(w => ({ type: 'waypoints', record: w })),
+    ...all.tracks.map(t => ({ type: 'tracks', record: t }))
+  ];
+  const res = await Share.adoptLooseRecords(records);
+  await redrawAllDataFromStore();
+  renderDataPanel();
+  const extra = res.bindingsDropped ? ` ${res.bindingsDropped} flag(s) came in unbound.` : '';
+  await showAlert('Imported', `${res.added} item(s) added to the current session.${extra}`);
+  logInfo(`Imported ${res.added} item(s) into the current session.`);
+}
+
+async function renderImportBrowser() {
+  const listEl = document.getElementById('import-browser-list');
+  // The full path rather than just the relative fragment: "Download" alone
+  // does not tell you which storage you are looking at, and the action beneath
+  // it operates on this folder.
+  document.getElementById('import-browser-path').textContent =
+    `/storage/emulated/0/${importBrowserPath}`.replace(/\/$/, '');
+  document.getElementById('btn-import-browser-up').disabled = !importBrowserPath;
+  listEl.innerHTML = '<li><span>Loading...</span></li>';
+
+  let entries = { folders: [], files: [] };
+  try {
+    entries = await Storage.listEntries(importBrowserPath, '.gpx');
+  } catch (e) {
+    listEl.innerHTML = '';
+    const li = document.createElement('li');
+    li.innerHTML = `<span><small>Could not read that folder: ${e.message}</small></span>`;
+    listEl.appendChild(li);
+    return;
+  }
+
+  listEl.innerHTML = '';
+  document.getElementById('btn-import-browser-folder').disabled = entries.files.length === 0;
+
+  // Icon rather than a "Folder" / "GPX file" subtitle: the subtitle repeated
+  // what the row already was and made every line look the same at a glance,
+  // which is the thing a browser most needs to avoid. Reuses .tree-icon so
+  // both lists size their icons identically.
+  const browserRow = (label, iconName, onClick) => {
+    const li = document.createElement('li');
+    const icon = document.createElement('span');
+    icon.className = 'tree-icon';
+    icon.innerHTML = ICONS[iconName] || '';
+    const text = document.createElement('span');
+    text.textContent = label;
+    li.appendChild(icon);
+    li.appendChild(text);
+    li.onclick = onClick;
+    return li;
+  };
+
+  for (const folder of entries.folders) {
+    listEl.appendChild(browserRow(folder, 'folder', () => {
+      importBrowserPath = importBrowserPath ? `${importBrowserPath}/${folder}` : folder;
+      renderImportBrowser();
+    }));
+  }
+  for (const file of entries.files) {
+    listEl.appendChild(browserRow(file, 'file', () => importSinglePath(file)));
+  }
+  if (!entries.folders.length && !entries.files.length) {
+    const li = document.createElement('li');
+    li.innerHTML = '<span><small>Nothing here</small></span>';
+    listEl.appendChild(li);
+  }
+}
+
+async function importSinglePath(filename) {
+  const full = importBrowserPath ? `${importBrowserPath}/${filename}` : filename;
+  try {
+    const parsed = Formats.parseGpx(await Storage.readExternalPath(full));
+    if (parsed.errors.length && !parsed.waypoints.length && !parsed.routes.length && !parsed.tracks.length) {
+      await showAlert('Could not read that file', parsed.errors[0]);
+      return;
+    }
+    const counts = `${parsed.waypoints.length} flag(s), ${parsed.routes.length} route(s), ${parsed.tracks.length} track(s)`;
+    const dest = await askImportDestination(`${filename} contains ${counts}.`);
+    if (!dest) return;
+    closeOverlay('sheet-import-browser');
+    await importParsedInto([parsed], dest, filename.replace(/\.gpx$/i, ''));
+  } catch (e) {
+    logError(`Import failed for ${full}: ${e.message}`);
+    await showAlert('Import failed', e.message);
+  }
+}
+
+document.getElementById('btn-import-browser-up').onclick = () => {
+  importBrowserPath = importBrowserPath.includes('/')
+    ? importBrowserPath.slice(0, importBrowserPath.lastIndexOf('/'))
+    : '';
+  renderImportBrowser();
+};
+
+document.getElementById('btn-import-browser-folder').onclick = async () => {
+  try {
+    const { files } = await Storage.listEntries(importBrowserPath, '.gpx');
+    if (!files.length) return;
+    const parsedList = [];
+    const failed = [];
+    for (const f of files) {
+      const full = importBrowserPath ? `${importBrowserPath}/${f}` : f;
+      try {
+        parsedList.push(Formats.parseGpx(await Storage.readExternalPath(full)));
+      } catch (e) {
+        // One unreadable file must not abandon the rest, since these come from
+        // wherever the user happened to be browsing.
+        failed.push(f);
+      }
+    }
+    const total = parsedList.reduce((n, p) => n + p.waypoints.length + p.routes.length + p.tracks.length, 0);
+    const label = importBrowserPath.split('/').pop() || 'Imported';
+    const dest = await askImportDestination(
+      `${files.length} file(s) in this folder contain ${total} item(s)${failed.length ? `, and ${failed.length} could not be read` : ''}.`);
+    if (!dest) return;
+    closeOverlay('sheet-import-browser');
+    await importParsedInto(parsedList, dest, label);
+  } catch (e) {
+    logError(`Folder import failed: ${e.message}`);
+    await showAlert('Import failed', e.message);
+  }
+};
+
+// ---------- Delete everything ----------
+// The most destructive action in the app, so the dialog states the scale
+// before the tap rather than after it, and the scope line updates live as the
+// two opt-outs are ticked. "Delete 431 files" and "delete everything" should
+// not look identical at the moment of deciding.
+
+function describeDeleteScope() {
+  const keepTiles = document.getElementById('delete-keep-tiles').checked;
+  const keepSettings = document.getElementById('delete-keep-settings').checked;
+  const going = ['your waypoints, routes, tracks and sessions', 'everything in the Datum folder'];
+  if (!keepTiles) going.push('all downloaded map tiles');
+  if (!keepSettings) going.push('all settings and layer presets');
+  const kept = [];
+  if (keepTiles) kept.push('downloaded map tiles');
+  if (keepSettings) kept.push('settings and layer presets');
+  document.getElementById('delete-everything-scope').textContent =
+    `This will delete ${going.join(', ')}.${kept.length ? ` It will keep ${kept.join(' and ')}.` : ' Nothing will be kept.'}`;
+}
+document.getElementById('delete-keep-tiles').onchange = describeDeleteScope;
+document.getElementById('delete-keep-settings').onchange = describeDeleteScope;
+document.getElementById('btn-delete-everything-cancel').onclick = () => closeOverlay('dialog-delete-everything');
+
+document.getElementById('btn-delete-everything').onclick = async () => {
+  let counts = { files: 0, sessions: 0 };
+  let tiles = { count: 0 };
+  try {
+    counts = await Storage.countEverything();
+    tiles = await getTileCacheStats();
+  } catch (e) {
+    // Counting is a courtesy. If storage is unreachable the delete can still
+    // proceed on the database side.
+  }
+  document.getElementById('delete-everything-summary').textContent =
+    `${counts.files} file(s) across ${counts.sessions} session folder(s), and ${tiles.count || 0} cached map tile(s).`;
+  document.getElementById('delete-keep-tiles').checked = false;
+  document.getElementById('delete-keep-settings').checked = false;
+  describeDeleteScope();
+  openDialog('dialog-delete-everything');
+  dialogDismissHandlers.set('dialog-delete-everything', () => closeOverlay('dialog-delete-everything'));
+};
+
+document.getElementById('btn-delete-everything-confirm').onclick = async () => {
+  const keepTiles = document.getElementById('delete-keep-tiles').checked;
+  const keepSettings = document.getElementById('delete-keep-settings').checked;
+  closeOverlay('dialog-delete-everything');
+
+  // A second confirmation, deliberately. One tap on a button labelled Delete
+  // is not enough for an action with no undo and no backup left behind.
+  const ok = await askConfirm('Are you sure?',
+    'This cannot be undone, and there is no copy left afterwards. Take a backup first if there is anything here you might want.');
+  if (!ok) return;
+
+  try {
+    // Files first. Wiping the database first would leave the mirror with
+    // nothing to reconcile against, and any write racing the delete would
+    // recreate files under a folder that is about to go.
+    let removed = 0;
+    try {
+      removed = await Storage.deleteEverything();
+    } catch (e) {
+      logError(`Could not delete the storage folder: ${e.message}`);
+    }
+    await Store.deleteAllRecords();
+    if (!keepTiles) await deleteAllTiles();
+    if (!keepSettings) Storage.clearAllSettings();
+
+    clearAllDataLayers();
+    currentSessionName = null;
+    currentSessionId = null;
+    Mirror.setActiveSession(null);
+    await redrawAllDataFromStore();
+    renderDataPanel();
+    renderStorageHealth();
+
+    const kept = [];
+    if (keepTiles) kept.push('map tiles');
+    if (keepSettings) kept.push('settings');
+    await showAlert('Deleted',
+      `${removed} file(s) removed and the database cleared.${kept.length ? ` Kept: ${kept.join(' and ')}.` : ''}`
+      + (keepSettings ? '' : ' Datum is back to its first-run state.'));
+    logInfo(`Delete all: ${removed} file(s), tiles ${keepTiles ? 'kept' : 'cleared'}, settings ${keepSettings ? 'kept' : 'cleared'}.`);
+  } catch (e) {
+    logError(`Delete all failed: ${e.message}`);
+    await showAlert('Delete failed', e.message);
+  }
+};
+
+document.getElementById('btn-import-browse').onclick = async () => {
+  if (!Storage.isAllFilesAccessPluginAvailable()) {
+    await showAlert('Not available', 'Browsing needs a rebuild first. Run "npm run fix-manifest" and rebuild the APK.');
+    return;
+  }
+  if (!await Storage.isAllFilesAccessGranted()) {
+    const ok = await askConfirm('Allow file access?',
+      'Browsing for a file needs "All files access". The next screen is Android\'s own settings page: turn on the toggle for Datum, then come back and tap Import a file again.');
+    if (ok) await Storage.requestAllFilesAccess();
+    return;
+  }
+  importBrowserPath = '';
+  openOverlay('sheet-import-browser');
+  renderImportBrowser();
+};
+
+document.getElementById('btn-sync-storage').onclick = async () => {
+  try {
+    await Storage.ensureStorageRoot();
+    const found = await Share.scanForUnknownFiles();
+    const recordCount = found.newRecords.length;
+    const folderCount = found.newSessionFolders.length;
+
+    if (!recordCount && !folderCount) {
+      await showAlert('Nothing new',
+        found.errors.length
+          ? `No new files found. ${found.errors.length} file(s) could not be read.`
+          : 'Everything in your Datum folder is already in the app.');
+      return;
     }
 
-    const res = await Share.importAllFrom(undefined, onCollision);
+    const parts = [];
+    if (folderCount) parts.push(`${folderCount} session folder(s) copied in`);
+    if (recordCount) parts.push(`${recordCount} loose item(s)`);
+    const ok = await askConfirm('Sync from folder?',
+      `Found ${parts.join(' and ')}. Adding them to Datum. Nothing already in the app will be changed or duplicated.`);
+    if (!ok) return;
+
+    let sessions = 0, added = 0, bindings = 0, dropped = 0;
+    for (const entry of found.newSessionFolders) {
+      // The folder name is reused as the session id, so the mirror keeps
+      // writing to that same folder instead of making a second one beside it.
+      await Share.adoptSessionFolder(entry);
+      sessions++;
+    }
+    if (recordCount) {
+      const res = await Share.adoptLooseRecords(found.newRecords);
+      added = res.added; bindings = res.bindingsRestored; dropped = res.bindingsDropped;
+    }
+
     await redrawAllDataFromStore();
     renderDataPanel();
 
-    const parts = [`${res.files} file(s) read.`, `${res.imported} new item(s) added.`];
-    if (res.updated) parts.push(`${res.updated} existing item(s) updated.`);
-    if (res.skipped) parts.push(`${res.skipped} already-present item(s) left alone.`);
-    if (res.bindingsRestored) parts.push(`${res.bindingsRestored} flag binding(s) reconnected to their route.`);
-    // Surfaced rather than swallowed: a flag arriving unbound when the sender
-    // had it bound is a real difference in the data, and silently losing it is
-    // how someone ends up wondering why navigation skips a waypoint.
-    if (res.bindingsDropped) parts.push(`${res.bindingsDropped} flag(s) came in unbound because their route was not in the same file. Import that route alongside them to reconnect.`);
-    // Capped so a folder full of unreadable files cannot produce a dialog
-    // taller than the screen with no way to dismiss it.
-    if (res.errors.length) parts.push(`\nSkipped:\n${res.errors.slice(0, 5).join('\n')}${res.errors.length > 5 ? `\n...and ${res.errors.length - 5} more` : ''}`);
-    await showAlert('Import complete', parts.join(' '));
-    logInfo(`GPX import: ${res.imported} added, ${res.updated} updated, ${res.skipped} skipped, from ${res.files} file(s), ${res.errors.length} problem(s).`);
+    const summary = [];
+    if (sessions) summary.push(`${sessions} session(s) added.`);
+    if (added) summary.push(`${added} item(s) added to the current session.`);
+    if (bindings) summary.push(`${bindings} flag binding(s) reconnected.`);
+    if (dropped) summary.push(`${dropped} flag(s) came in unbound because their route was not in the same folder.`);
+    if (found.errors.length) summary.push(`\n${found.errors.length} file(s) could not be read:\n${found.errors.slice(0, 3).join('\n')}`);
+    await showAlert('Sync complete', summary.join(' '));
+    logInfo(`Sync from folder: ${sessions} session(s), ${added} item(s), ${found.errors.length} problem(s).`);
   } catch (e) {
-    logError(`Import failed: ${e.message}`);
-    await showAlert('Import failed', e.message);
+    logError(`Sync failed: ${e.message}`);
+    await showAlert('Sync failed', e.message);
   }
 };
 

@@ -148,6 +148,20 @@ export async function deleteSession(id) {
 // Wipes current working waypoints/routes/tracks. Used by "New Session"
 // (after the user has confirmed) and internally by loadSession before
 // restoring a snapshot. Map tiles are never touched by this.
+// Wipes the working stores AND every saved session, which clearCurrentData
+// deliberately does not: that one is for starting a new session and must leave
+// saved ones alone. This is for the full delete, where nothing is spared.
+export async function deleteAllRecords() {
+  const db = await openDB();
+  const stores = ['waypoints', 'routes', 'tracks', 'sessions'];
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(stores, 'readwrite');
+    stores.forEach(s => tx.objectStore(s).clear());
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 export async function clearCurrentData() {
   const db = await openDB();
   await Promise.all(['waypoints', 'routes', 'tracks'].map(store => new Promise((resolve, reject) => {

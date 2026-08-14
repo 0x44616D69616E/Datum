@@ -163,7 +163,15 @@
         <button id="btn-new-session" class="btn-secondary">New session</button>
       </div>
       <p class="hint">A session is your waypoints, routes, and tracks. Downloaded map data is always kept separately, no matter what.</p>
-      <div class="button-row">
+      <div id="storage-alert" class="storage-alert hidden">
+      <div class="storage-alert-title">Some files could not be written</div>
+      <div class="hint" id="storage-alert-detail"></div>
+      <div class="hint">The usual cause is Datum losing permission to write to storage, or the folder being moved or deleted.</div>
+      <button id="btn-storage-retry" class="btn-danger full-width">Try again</button>
+      <button id="btn-storage-permissions" class="btn-secondary full-width">Check storage permissions</button>
+    </div>
+
+    <div class="button-row">
         <button id="btn-tree-select" class="btn-secondary">Select</button>
         <button id="btn-tree-delete" class="btn-danger hidden">Delete selected</button>
       </div>
@@ -197,8 +205,12 @@
       <p class="hint">Packaging writes one GPX containing an entire session into that session's folder, which is the single file to send someone.</p>
       <div class="button-row">
         <button id="btn-package-session" class="btn-primary">Package session as one file</button>
-        <button id="btn-import-share" class="btn-secondary">Import from folder</button>
+        <button id="btn-sync-storage" class="btn-secondary">Sync from folder</button>
       </div>
+      <div class="button-row">
+        <button id="btn-import-browse" class="btn-secondary">Import a file</button>
+      </div>
+      <p class="hint">Sync picks up anything added to your Datum folder from outside the app. Copy a whole session folder into <b>sessions/</b> and it becomes a session; drop files into <b>current/waypoints</b>, <b>routes</b> or <b>tracks</b> and they join what you are working on. Files Datum wrote itself are recognised and left alone.</p>
       <div class="button-row">
         <button id="btn-tidy-storage" class="btn-secondary">Tidy up old folders</button>
       </div>
@@ -332,6 +344,12 @@
     </div>
 
     <div class="data-section">
+      <h3>Delete all data</h3>
+      <p class="hint">Removes everything Datum has stored on this device. Uninstalling the app does not do this on its own, because the storage folder lives outside the app.</p>
+      <button id="btn-delete-everything" class="btn-danger full-width">Delete all Datum data</button>
+    </div>
+
+    <div class="data-section">
       <h3>About Datum</h3>
       <p class="hint">A fully offline topo, satellite, and trail map. Free, open source under the MIT licence, with no account, no ads, and nothing sent anywhere.</p>
       <p class="hint">Built by <a href="https://github.com/0x44616D69616E" target="_blank" rel="noopener noreferrer">0x44616D69616E</a> &middot; <a href="https://github.com/0x44616D69616E/Datum" target="_blank" rel="noopener noreferrer">Source on GitHub</a></p>
@@ -379,6 +397,20 @@
      via a system Settings screen since there's no normal runtime dialog
      for it). Falls back to the Documents/Downloads dialog above if that
      permission isn't granted or the plugin isn't available. -->
+<div id="sheet-import-browser" class="sheet hidden">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><h2>Import GPX</h2><button class="icon-btn sheet-close" data-target="sheet-import-browser" data-icon="close"></button></div>
+  <div class="sheet-body">
+    <p class="hint">Tap a GPX file to import it, or import every GPX in the folder you are looking at.</p>
+    <div class="path-bar" id="import-browser-path"></div>
+    <div class="button-row">
+      <button id="btn-import-browser-up" class="btn-secondary">Up one level</button>
+      <button id="btn-import-browser-folder" class="btn-primary">Import this folder</button>
+    </div>
+    <ul id="import-browser-list" class="data-list"></ul>
+  </div>
+</div>
+
 <div id="sheet-folder-browser" class="sheet hidden">
   <div class="sheet-handle"></div>
   <div class="sheet-header"><h2 id="folder-browser-path">Storage</h2><button class="icon-btn sheet-close" data-target="sheet-folder-browser" data-icon="close"></button></div>
@@ -448,6 +480,34 @@
 <!-- Start-recording confirm dialog -->
 <!-- Stop-recording dialog. Three outcomes, and opening it does not interrupt
      the recording: only Save and Delete end it. -->
+<div id="dialog-delete-everything" class="dialog hidden">
+  <h2>Delete all Datum data?</h2>
+  <p class="hint" id="delete-everything-summary"></p>
+  <label class="check-row">
+    <input type="checkbox" id="delete-keep-tiles" />
+    <span>Keep downloaded map tiles<br><small>Tick this to clear your waypoints, routes and tracks but keep the maps you have downloaded, which can be slow and expensive to fetch again.</small></span>
+  </label>
+  <label class="check-row">
+    <input type="checkbox" id="delete-keep-settings" />
+    <span>Keep settings<br><small>Units, theme, layer setup, saved layer presets, and your storage folder choice.</small></span>
+  </label>
+  <p class="hint" id="delete-everything-scope"></p>
+  <div class="dialog-actions dialog-actions-stacked">
+    <button id="btn-delete-everything-confirm" class="btn-danger full-width">Delete</button>
+    <button id="btn-delete-everything-cancel" class="btn-secondary full-width">Cancel</button>
+  </div>
+</div>
+
+<div id="dialog-import-destination" class="dialog hidden">
+  <h2>Where should this go?</h2>
+  <p class="hint" id="import-destination-summary"></p>
+  <div class="dialog-actions dialog-actions-stacked">
+    <button id="btn-import-dest-current" class="btn-primary full-width">Add to current session</button>
+    <button id="btn-import-dest-new" class="btn-secondary full-width">Load as a new session</button>
+    <button id="btn-import-dest-cancel" class="btn-secondary full-width">Cancel</button>
+  </div>
+</div>
+
 <div id="dialog-stop-record" class="dialog hidden">
   <h2>Stop recording?</h2>
   <p class="hint" id="stop-record-summary"></p>

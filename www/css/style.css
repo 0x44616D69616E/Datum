@@ -1532,3 +1532,55 @@ body.theme-glass .gps-dot {
 }
 .fab.pinned.recording { animation: recordGlowPinned 1.4s ease-in-out infinite; }
 body.theme-glass .fab.pinned { border: 1px solid rgba(255, 255, 255, 0.45); }
+
+/* Storage failure alert, shown in the Data sheet when the mirror has writes it
+   could not complete. Deliberately loud: a file that was never written is data
+   the user believes is backed up and is not. */
+.storage-alert {
+  margin: 10px 0 14px; padding: 12px 14px;
+  border: 1px solid var(--danger); border-radius: var(--radius-md);
+  background: var(--danger-soft);
+}
+.storage-alert-title { color: var(--danger); font-weight: 700; margin-bottom: 4px; }
+
+/* The warning badge on the menu and data buttons. A dot would be easy to miss
+   on a busy map, so it is a full glyph replacement: the icon itself becomes an
+   exclamation mark and the button goes red. */
+.fab.has-storage-error { background: var(--danger); }
+.fab.has-storage-error svg { display: none; }
+.fab.has-storage-error::after {
+  content: "!";
+  font-size: 24px; font-weight: 800; color: #fff; line-height: 1;
+}
+body.theme-glass .fab.has-storage-error { background: rgba(214, 58, 65, 0.75); }
+body.theme-glass .fab.has-storage-error::after { text-shadow: var(--outline-text); }
+
+/* Import browser rows: icon then label, together on the left.
+   .data-list li sets justify-content: space-between, which is right for its
+   usual two-child "label ... action" shape but pushes an icon and its own
+   label to opposite edges of the row. flex-start is what keeps them adjacent,
+   and the label takes the remaining width so long filenames ellipsise rather
+   than wrapping under the icon. */
+#import-browser-list li {
+  display: flex; align-items: center; gap: 10px;
+  justify-content: flex-start;
+}
+#import-browser-list li > span:last-child {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#import-browser-list li .tree-icon { flex: 0 0 auto; }
+
+/* Current location in the import browser. Given its own bar above the actions
+   rather than a hint below them, because "import this folder" is meaningless
+   without knowing which folder that is, and the answer should be visible at
+   the moment of deciding rather than further down the sheet. */
+.path-bar {
+  margin: 8px 0 4px; padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-soft);
+  font-size: 12px; font-family: monospace;
+  color: var(--text);
+  word-break: break-all;
+}

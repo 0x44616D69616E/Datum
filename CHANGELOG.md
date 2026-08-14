@@ -2,6 +2,38 @@
 
 All notable changes to Datum are documented here.
 
+## v1.5.0
+
+### Added
+
+- **Import a file from anywhere on your device.** Browse to a GPX, or import
+  every GPX in a folder, and choose whether it joins your current session or
+  loads as a new one. If you have unsaved work, Datum offers to save it first
+  rather than replacing it.
+- **Sync from folder.** Anything copied into your Datum folder from outside
+  the app can now be brought in. Drop a whole session folder into
+  **sessions/** and it becomes a session; drop files into **current/waypoints**,
+  **routes** or **tracks** and they join what you are working on. Files Datum
+  wrote itself are recognised and left alone.
+- **Recorded tracks now have the same options as plotted routes.** Tap a track
+  for More, Trim and Delete. Track details show start and finish times,
+  duration, average pace, elevation gain and point count.
+- **A warning when files cannot be written.** If Datum loses access to your
+  storage folder, the menu button turns red and the Data sheet lists what did
+  not save, with a retry and a shortcut to Android's permission screen. Datum
+  remembers what still needs writing, even across a restart.
+- **Delete all Datum data**, in Settings. Removes the storage folder and the
+  database, with the option to keep downloaded map tiles or your settings.
+  Uninstalling the app does not do this on its own, because the storage folder
+  lives outside the app.
+
+### Fixed
+
+- Renaming a route or track no longer leaves the old file behind, which used
+  to put the same record on disk twice under two different names.
+- Files that failed to write while storage was unavailable are no longer
+  forgotten. They are queued and can be retried once access is restored.
+
 ## v1.4.0
 
 ### Added

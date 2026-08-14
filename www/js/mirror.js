@@ -56,30 +56,120 @@ function documentFor(store, record) {
 // flags), and letting those interleave on the filesystem invites half-written
 // files and directory-creation races.
 let chain = Promise.resolve();
-let pendingFailures = 0;
+
+// ---------------------------------------------------------------------------
+// Pending writes
+// ---------------------------------------------------------------------------
+//
+// A failed mirror write used to be counted and forgotten, which meant a record
+// created while storage was unavailable simply had no file and nothing ever
+// said so or fixed it. The queue below remembers what still needs writing, and
+// survives a restart, because storage being unavailable often outlasts the
+// session that hit it.
+//
+// Only identity is stored, never content: for a save, the record is still in
+// the database and the file can be regenerated from it at retry time, which is
+// also more correct than replaying a stale copy. Deletes are the exception,
+// since the record is gone, so the filename is kept for those.
+
+const PENDING_KEY = 'mirrorPending';
+let pending = [];
+
+function loadPending() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PENDING_KEY) || '[]');
+    pending = Array.isArray(raw) ? raw : [];
+  } catch (e) {
+    pending = [];
+  }
+}
+function savePending() {
+  try {
+    localStorage.setItem(PENDING_KEY, JSON.stringify(pending));
+  } catch (e) { /* storage full or unavailable; the in-memory list still works */ }
+}
+
+// Keyed on store+id+action so a record failing repeatedly does not accumulate
+// duplicate entries, which over a long trip with no storage would grow without
+// bound.
+function addPending(entry) {
+  const i = pending.findIndex(p => p.store === entry.store && p.id === entry.id && p.action === entry.action);
+  if (i === -1) pending.push(entry); else pending[i] = entry;
+  savePending();
+  notifyHealth();
+}
+function clearPending(store, id, action) {
+  const before = pending.length;
+  pending = pending.filter(p => !(p.store === store && p.id === id && p.action === action));
+  if (pending.length !== before) { savePending(); notifyHealth(); }
+}
+
+let healthListener = null;
+export function onMirrorHealthChange(fn) { healthListener = fn; }
+function notifyHealth() {
+  if (healthListener) { try { healthListener(pending.length); } catch (e) { /* never break a write */ } }
+}
+
+export function getPendingWrites() { return pending.slice(); }
+export function getPendingCount() { return pending.length; }
+
+loadPending();
 
 function enqueue(task) {
   chain = chain.then(task).catch((e) => {
-    // Counted rather than surfaced per failure: if storage has gone away,
-    // every subsequent record would raise its own dialog. The count is
-    // reported once, by flushMirrorStatus.
-    pendingFailures++;
     logError(`Mirror write failed: ${e.message}`);
   });
   return chain;
 }
 
+// The filename a record was last written under, so a rename can delete the
+// file it replaces. The name is part of the filename, so renaming otherwise
+// writes a second file and leaves the first behind: same record, twice on
+// disk, under two different names.
+const lastFileName = new Map();
+
 async function writeRecord(store, record) {
   if (!record || !record.id) return;
+  const filename = fileNameFor(record);
   const xml = buildGpx(documentFor(store, record));
-  await Storage.writeRecordFile(baseDir(), store, fileNameFor(record), xml);
+  try {
+    await Storage.writeRecordFile(baseDir(), store, filename, xml);
+  } catch (e) {
+    addPending({ store, id: record.id, action: 'save', name: record.name || 'Untitled' });
+    throw e;
+  }
+  clearPending(store, record.id, 'save');
+
+  // Orphan cleanup, after the new file exists rather than before: if the write
+  // failed, deleting the old one first would leave no copy at all.
+  const previous = lastFileName.get(`${store}:${record.id}`);
+  if (previous && previous !== filename) {
+    try {
+      await Storage.deleteRecordFile(baseDir(), store, previous);
+    } catch (e) {
+      addPending({ store, id: record.id, action: 'delete', filename: previous, name: record.name || 'Untitled' });
+    }
+  }
+  lastFileName.set(`${store}:${record.id}`, filename);
 }
 
 async function removeRecord(store, record) {
   if (!record || !record.id) return;
-  // A record deleted before it was ever mirrored has no file, which
-  // deleteRecordFile already tolerates.
-  await Storage.deleteRecordFile(baseDir(), store, fileNameFor(record));
+  const filename = fileNameFor(record);
+  try {
+    // A record deleted before it was ever mirrored has no file, which
+    // deleteRecordFile already tolerates.
+    await Storage.deleteRecordFile(baseDir(), store, filename);
+    lastFileName.delete(`${store}:${record.id}`);
+    clearPending(store, record.id, 'delete');
+    // A pending save for a record that has just been deleted is moot, and
+    // retrying it would resurrect a file for something no longer in the
+    // database.
+    clearPending(store, record.id, 'save');
+  } catch (e) {
+    addPending({ store, id: record.id, action: 'delete', filename, name: record.name || 'Untitled' });
+    throw e;
+  }
 }
 
 const RECORD_STORES = ['waypoints', 'routes', 'tracks'];
@@ -92,12 +182,38 @@ export function startMirroring() {
   });
 }
 
-// Reports accumulated failures once and resets, so a stale mirror is
-// discoverable rather than being found out at the worst possible moment.
-export function takeFailureCount() {
-  const n = pendingFailures;
-  pendingFailures = 0;
-  return n;
+// Retries everything still outstanding. Safe to call repeatedly: successes
+// drop out of the queue, failures stay, and the caller gets both counts.
+export async function retryPendingWrites() {
+  if (!Storage.isStorageConfigured()) return { fixed: 0, failed: pending.length };
+  // Snapshot first: entries are removed from `pending` as they succeed, so
+  // iterating it directly would skip items.
+  const queue = pending.slice();
+  let fixed = 0;
+  for (const entry of queue) {
+    try {
+      if (entry.action === 'delete') {
+        await Storage.deleteRecordFile(baseDir(), entry.store, entry.filename);
+        clearPending(entry.store, entry.id, 'delete');
+        fixed++;
+        continue;
+      }
+      // Regenerated from the database rather than replayed from a stored copy,
+      // so a record edited since the failure is written as it is now.
+      const record = await Store.getRecord(entry.store, entry.id);
+      if (!record) {
+        // Deleted in the meantime, so there is nothing left to write.
+        clearPending(entry.store, entry.id, 'save');
+        fixed++;
+        continue;
+      }
+      await writeRecord(entry.store, record);
+      fixed++;
+    } catch (e) {
+      logError(`Retry failed for ${entry.name || entry.id}: ${e.message}`);
+    }
+  }
+  return { fixed, failed: pending.length };
 }
 
 // Waits for queued writes to settle. Used before anything that reads the

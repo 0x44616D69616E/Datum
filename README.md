@@ -6,7 +6,7 @@ Datum works entirely offline once you've downloaded a region: satellite imagery,
 
 No account. No analytics. Nothing you record is uploaded anywhere. Your waypoints, routes, and tracks are written to a folder on your own device as standard GPX files, which means they're yours to open in other apps, back up, or share, and they never go anywhere you don't send them.
 
-### [Download Datum v1.4.0 for Android](https://github.com/0x44616D69616E/Datum/releases/download/v1.4.0/datum-1.4.0.apk)
+### [Download Datum v1.5.0 for Android](https://github.com/0x44616D69616E/Datum/releases/download/v1.5.0/datum-1.5.0.apk)
 
 Free, no ads, no account, no subscription, no tracking. 6.4 MB.
 [All releases](https://github.com/0x44616D69616E/Datum/releases) · [Installation help](https://freemaps.org)
@@ -71,27 +71,20 @@ True-north compass needle, tap to reset rotation. Optional heading ribbon driven
 
 Datum is MIT licensed and free. There is no sign-up, no subscription, no analytics SDK, and no server that could collect anything even if it wanted to. It was written because good offline mapping shouldn't cost a monthly fee.
 
-## What's new in 1.4.0
+## What's new in 1.5.0
 
 ### Added
 
-- **Liquid glass theme**, an optional translucent look that keeps the map visible behind panels and menus. Off by default; toggle it in Settings.
-- **Record button can stay on screen** with the menu closed, so a recording starts and stops in one tap.
-- **Recorded tracks now have the same options as plotted routes**: More, Trim and Delete, plus a details summary showing duration, average pace and elevation gain.
-- **Bottom sheets can be pulled down** by their handle to peek at the map, and flicked down to close.
-- **About section in Settings**, with a source link and a way to support the project.
-
-### Changed
-
-- **Timestamps are left out of shared files by default.** A path alone shows where a trail goes; timestamps also show what hours you were out.
-- **Export options are remembered** between launches.
-- **Stopping a recording asks what to do with it**, offering save, delete, or keep recording. Tapping the button no longer stops the recording by itself.
+- **Import a file from anywhere on your device.** Browse to a GPX, or import every GPX in a folder, and choose whether it joins your current session or loads as a new one.
+- **Sync from folder.** Copy a whole session folder into **sessions/** and it becomes a session; drop files into **current/waypoints**, **routes** or **tracks** and they join what you are working on.
+- **Recorded tracks have the same options as plotted routes**: More, Trim and Delete, plus a summary showing duration, average pace and elevation gain.
+- **A warning when files cannot be written.** If Datum loses access to your storage folder, the menu button turns red and the Data sheet lists what did not save, with a retry and a shortcut to Android's permission screen.
+- **Delete all Datum data**, in Settings, with the option to keep map tiles or settings. Uninstalling the app does not remove the storage folder on its own.
 
 ### Fixed
 
-- **Cancelling the "name this track" prompt no longer deletes the recording.** It previously discarded the track with no warning.
-- **Starting a new session while recording no longer discards the track.**
-- Sheets slide open and closed instead of appearing instantly.
+- Renaming a route or track no longer leaves the old file behind.
+- Files that failed to write while storage was unavailable are queued and retried rather than forgotten.
 
 Full history is in [CHANGELOG.md](CHANGELOG.md), and older releases are listed under [Releases](https://github.com/0x44616D69616E/Datum/releases).
 
@@ -207,7 +200,7 @@ The data layer runs one way on purpose: IndexedDB is authoritative and the folde
 
 ## Installing the APK
 
-**[Download Datum v1.4.0](https://github.com/0x44616D69616E/Datum/releases/download/v1.4.0/datum-1.4.0.apk)**, or browse [all releases](https://github.com/0x44616D69616E/Datum/releases).
+**[Download Datum v1.5.0](https://github.com/0x44616D69616E/Datum/releases/download/v1.5.0/datum-1.5.0.apk)**, or browse [all releases](https://github.com/0x44616D69616E/Datum/releases).
 
 Datum isn't distributed through the Play Store, so Android shows two separate warnings the first time you install it:
 
