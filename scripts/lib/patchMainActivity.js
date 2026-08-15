@@ -11,13 +11,14 @@ const path = require('path');
 
 // Finds MainActivity.java by actually searching the java/ tree, rather
 // than computing the expected path from capacitor.config.json's appId.
-// Those can disagree in practice - if the android/ project was generated
-// before an appId rename (as happened here: capacitor.config.json says
-// com.alienwizard.cairn, but the native project was generated back when
-// it was com.alienwizard.offlinetopo, and renaming an already-generated
-// Android package isn't something changing one config field does
-// retroactively) - so this reads the real package straight out of the
-// file's own `package X;` line instead of assuming it matches config.
+// The two can disagree, because changing appId does not rename an
+// already-generated Android package: an existing android/ directory keeps
+// whatever it was created with. That is exactly what happened here for a
+// long time, and searching is why it never broke a build.
+//
+// A clean checkout has no android/ at all, so it is generated fresh from
+// the current appId and the two agree from the start. This search still
+// matters for any working copy carried across a rename.
 function findMainActivity(projectRoot) {
   const javaRoot = path.join(projectRoot, 'android', 'app', 'src', 'main', 'java');
   if (!fs.existsSync(javaRoot)) return null;
