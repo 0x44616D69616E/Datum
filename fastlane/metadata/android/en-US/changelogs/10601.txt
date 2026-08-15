@@ -1,0 +1,3 @@
+Build and packaging fixes only, no user-facing changes.
+
+The app now builds from a clean checkout in one command, and the Android version is derived from the project version rather than left at a default that prevented updates from installing.
