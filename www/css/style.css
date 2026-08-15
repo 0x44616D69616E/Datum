@@ -226,16 +226,8 @@ body.map-tap-mode .leaflet-overlay-pane .leaflet-interactive { pointer-events: n
    permanent control, so it costs no space in the normal case. */
 #compass-calibrate-warn {
   position: absolute; right: 5px; top: 5px;
-  color: var(--danger); pointer-events: none; /* the whole ribbon is the tap target */
-  display: flex; align-items: center; justify-content: center;
-}
-#compass-calibrate-warn svg { width: 13px; height: 13px; }
-#compass-calibrate-warn.hidden { display: none; }
-
-.beta-badge {
-  display: inline-block; margin-left: 6px; padding: 1px 6px;
-  border-radius: 999px; background: var(--accent-soft); color: var(--accent);
-  font-size: 9px; font-weight: 700; letter-spacing: 0.6px; vertical-align: middle;
+  color: var(--danger); pointer-events: none;
+  font-size: 10px; font-weight: 700;
 }
 
 /* ===== Navigation HUD - bottom bar, active while navigating a route.
@@ -1232,6 +1224,7 @@ body.theme-glass .pill-btn,
 body.theme-glass .tree-action,
 body.theme-glass .icon-picker-btn,
 body.theme-glass .item-actions button,
+body.theme-glass .btn-support,
 body.theme-glass .switch-track {
   box-shadow:
     inset 0 2px 3px rgba(255, 255, 255, 0.40),
@@ -1584,3 +1577,54 @@ body.theme-glass .fab.has-storage-error::after { text-shadow: var(--outline-text
   color: var(--text);
   word-break: break-all;
 }
+
+/* Links in body copy. Cyan rather than the accent blue on purpose: accent is
+   the colour of buttons, and a link that shares it reads as a control the user
+   failed to tap. Distinct hue, same job. */
+:root { --link: #4dd0e1; }
+.sheet-body a, .hint a { color: var(--link); text-decoration: none; border-bottom: 1px solid rgba(77, 208, 225, 0.4); }
+.sheet-body a:active, .hint a:active { border-bottom-color: var(--link); }
+body.theme-glass .sheet-body a,
+body.theme-glass .hint a { color: #6fe3f2; text-shadow: var(--outline-text); }
+
+/* Tip button. Pastel green, outlined rather than filled.
+   Outlined because a solid fill is what the app uses for primary actions, and
+   an optional tip in an app that advertises itself as free should not shout
+   louder than Save.
+   Pastel rather than a saturated green on purpose: --success (#3ecf8e) already
+   means "good status" here, on the GPS dot and search result labels, so the
+   tip button is deliberately lighter and softer than that to avoid reading as
+   a state indicator. */
+.btn-support {
+  /* Centred as a group with equal gaps, rather than space-between. On a
+     full-width button space-between would strand a heart at each far edge
+     with the text marooned in the middle; keeping them close reads as
+     decoration for the label rather than three separate things. */
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  padding: 13px 16px; border-radius: var(--radius-md);
+  background: rgba(143, 227, 180, 0.12);
+  border: 1px solid rgba(143, 227, 180, 0.5);
+  color: #8fe3b4; font-weight: 600; font-size: 15px;
+}
+.btn-support:active { background: rgba(143, 227, 180, 0.22); }
+/* Bevelled like every other button. It is the only outlined control in the
+   app, so without this it read as flat next to the filled ones and looked
+   less tappable than it is. */
+.btn-support {
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.16),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.22);
+}
+/* Deliberately larger than the app's other icons, which are sized to sit
+   beside 12px list text. This label is 15px and the hearts flank it, so they
+   are scaled to match its cap height rather than to the icon set's default. */
+.btn-support-icon { display: inline-flex; width: 22px; height: 22px; flex: 0 0 auto; }
+.btn-support-icon svg { width: 22px; height: 22px; }
+.btn-support-label { line-height: 1; }
+body.theme-glass .btn-support {
+  background: rgba(143, 227, 180, 0.22);
+  border-color: rgba(143, 227, 180, 0.65);
+  color: #a8f0c6;
+  text-shadow: var(--outline-text);
+}
+body.theme-glass .btn-support-icon svg { filter: var(--outline-icon); }

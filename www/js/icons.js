@@ -16,6 +16,18 @@ export const ICONS = {
 
   // File glyph for individual records in the session tree, so a waypoint reads
   // as a thing rather than as another folder.
+  // Ko-fi's own metaphor, and the shape people recognise for "tip jar".
+  coffee: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h13v6a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5V9Z"/><path d="M17 10h1.5a2.5 2.5 0 0 1 0 5H17"/><path d="M7 3v2M11 3v2M15 3v2"/></svg>`,
+
+  // Plain heart. A hand-holding-a-heart was tried first and did not survive
+  // being drawn at button size: fingers turn to noise below about 24px, so
+  // the shape read as a blob rather than a hand.
+  // Every y shifted up 1.66 from the first version. The glyph spanned y=7.01
+  // to y=20.30, so its own centre was 13.66 against a viewBox centre of 12,
+  // and it rendered about 1.5px low at button size no matter what the flexbox
+  // did. align-items was fine; the artwork was not.
+  heart: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 18.64s-7.5-4.6-7.5-9.4A4.4 4.4 0 0 1 12 6.54a4.4 4.4 0 0 1 7.5 2.7c0 4.8-7.5 9.4-7.5 9.4Z"/></svg>`,
+
   file: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7l-4-4Z"/><path d="M14 3v4h4"/></svg>`,
 
   layers: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 16 9 5 9-5"/></svg>`,

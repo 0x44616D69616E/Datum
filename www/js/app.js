@@ -1,7 +1,7 @@
 // app.js - main entry point, wires everything together.
 
 import { LAYER_SOURCES, DEFAULT_LAYER_STACK, PRESETS, ORDERED_PRESETS } from './layers.js';
-import { createOfflineTileLayer, downloadRegion, deleteTilesInRegion, deleteAllTiles, getTileCacheStats, estimateStorageUsage } from './tileCache.js';
+import { createOfflineTileLayer, downloadRegion, deleteTilesInRegion, deleteAllTiles, getTileCacheStats, estimateStorageUsage, clearBrowseCache, getBrowseCacheStats } from './tileCache.js';
 import { buildBordersLayer } from './boundariesLayer.js';
 import * as Radar from './radarPlayback.js';
 import * as GPS from './gps.js';
@@ -288,7 +288,13 @@ document.querySelectorAll('.sheet-close').forEach((btn) => {
 document.getElementById('btn-layers').onclick = () => toggleSheet('sheet-layers');
 document.getElementById('btn-download').onclick = () => { toggleSheet('sheet-download'); renderRegionsList('saved-map-regions-list-download', 'tile-cache-stats-download'); };
 document.getElementById('btn-data').onclick = () => { toggleSheet('sheet-data'); renderDataPanel(); };
-document.getElementById('btn-settings').onclick = () => toggleSheet('sheet-settings');
+document.getElementById('btn-settings').onclick = () => {
+  toggleSheet('sheet-settings');
+  // Read on open rather than at startup: it is a cursor walk over every
+  // cached tile, which is wasted work if the user never opens Settings, and
+  // stale by the time they do if it ran once at launch.
+  refreshBrowseCacheStats();
+};
 
 // ---------- FAB menu collapse ----------
 // All the action buttons live behind one toggle - tap to expand, tap
@@ -1903,6 +1909,40 @@ document.getElementById('delete-keep-tiles').onchange = describeDeleteScope;
 document.getElementById('delete-keep-settings').onchange = describeDeleteScope;
 document.getElementById('btn-delete-everything-cancel').onclick = () => closeOverlay('dialog-delete-everything');
 
+async function refreshBrowseCacheStats() {
+  const el = document.getElementById('browse-cache-stats');
+  if (!el) return;
+  try {
+    const { count, bytes } = await getBrowseCacheStats();
+    const mb = bytes / 1048576;
+    el.textContent = count
+      ? `${count.toLocaleString()} tile(s) cached from browsing, about ${mb >= 1024 ? (mb / 1024).toFixed(2) + ' GB' : mb.toFixed(1) + ' MB'}.`
+      : 'No tiles cached from browsing.';
+    document.getElementById('btn-clear-browse-cache').disabled = count === 0;
+  } catch (e) {
+    el.textContent = 'Could not read the tile cache.';
+  }
+}
+
+document.getElementById('btn-clear-browse-cache').onclick = async () => {
+  const { count, bytes } = await getBrowseCacheStats();
+  if (!count) return;
+  const mb = (bytes / 1048576).toFixed(1);
+  const ok = await askConfirm('Clear browsing cache?',
+    `Remove ${count.toLocaleString()} tile(s) cached while panning the map, freeing about ${mb} MB. Areas you downloaded deliberately are not affected, and browsing tiles come back on their own next time you have a connection.`);
+  if (!ok) return;
+  try {
+    const removed = await clearBrowseCache();
+    await refreshBrowseCacheStats();
+    renderRegionsList('saved-map-regions-list', 'tile-cache-stats');
+    showToast(`${removed.toLocaleString()} cached tile(s) cleared.`);
+    logInfo(`Browsing cache cleared: ${removed} tile(s).`);
+  } catch (e) {
+    logError(`Could not clear the browsing cache: ${e.message}`);
+    await showAlert('Could not clear cache', e.message);
+  }
+};
+
 document.getElementById('btn-delete-everything').onclick = async () => {
   let counts = { files: 0, sessions: 0 };
   let tiles = { count: 0 };
@@ -2325,7 +2365,72 @@ function setHeadingLock(on) {
   }
 }
 
-document.getElementById('btn-compass').onclick = () => setHeadingLock(!headingLocked);
+// The compass button cycles through three states rather than toggling one,
+// because "rotated away from north" and "locked to my heading" are different
+// problems and a single toggle could only address one of them.
+//
+//   rotated, unlocked  ->  straighten to north
+//   north-up, unlocked ->  lock to heading
+//   locked             ->  unlock and return to north
+//
+// Straightening first matters because the common case after a two-finger
+// twist is wanting the map square again, not wanting it to start following
+// the compass. Making that the same tap as engaging the lock would mean
+// overshooting into a mode the user did not ask for.
+//
+// Long press skips the straightening step and locks immediately, for when
+// you already know you want heading mode and do not care that the map is
+// currently askew.
+
+// Anything under a degree is rounding noise from the rotation animation, not
+// a deliberate bearing, so it counts as already north.
+const NORTH_EPSILON_DEG = 1;
+function mapIsNorthUp() {
+  if (!map.getBearing) return true;
+  const b = ((map.getBearing() % 360) + 360) % 360;
+  return b < NORTH_EPSILON_DEG || b > 360 - NORTH_EPSILON_DEG;
+}
+
+function straightenToNorth() {
+  if (!map.setBearing) return;
+  programmaticMove(() => map.setBearing(0));
+  logInfo('Map straightened to north-up.');
+}
+
+(() => {
+  const btn = document.getElementById('btn-compass');
+  let longPressTimer = null;
+  let firedLongPress = false;
+
+  const startPress = () => {
+    firedLongPress = false;
+    longPressTimer = setTimeout(() => {
+      firedLongPress = true;
+      longPressTimer = null;
+      if (!headingLocked) {
+        setHeadingLock(true);
+        showToast('Locked to your heading.');
+      }
+    }, 500);
+  };
+  const cancelPress = () => {
+    if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+  };
+
+  btn.addEventListener('pointerdown', startPress);
+  btn.addEventListener('pointerup', cancelPress);
+  btn.addEventListener('pointercancel', cancelPress);
+  btn.addEventListener('pointerleave', cancelPress);
+
+  btn.onclick = () => {
+    // The long press already acted, and the browser still fires click after
+    // it. Without this the map would lock and then immediately unlock again.
+    if (firedLongPress) { firedLongPress = false; return; }
+    if (headingLocked) setHeadingLock(false);
+    else if (!mapIsNorthUp()) straightenToNorth();
+    else setHeadingLock(true);
+  };
+})();
 
 // ---------- GPS / live position with real-time heading arrow ----------
 let myMarker = null;
@@ -2580,7 +2685,12 @@ document.addEventListener('click', (e) => {
 document.getElementById('compass-ribbon').onclick = () => togglePopover('popover-compass', renderNorthOffsetStatus);
 
 // Off by default - toggled from Settings ("Show compass").
-let showCompassRibbon = localStorage.getItem('showCompassRibbon') === 'true';
+// On by default, but the choice still persists. Reading `=== 'true'` would
+// have defaulted it off, and writing the default into storage on first run
+// would make "never chosen" indistinguishable from "deliberately on". Testing
+// for the off value instead means an absent key is on, and an explicit choice
+// either way is honoured from then on.
+let showCompassRibbon = localStorage.getItem('showCompassRibbon') !== 'false';
 function applyCompassRibbonVisibility() {
   document.getElementById('compass-ribbon').classList.toggle('hidden', !showCompassRibbon);
   // Drives --top-row-h, which is what keeps the flag/route/record pills
@@ -3216,6 +3326,9 @@ async function refreshFlagBindSection() {
   bindBtn.onclick = () => bindFlagToRoute(candidates);
 }
 
+// reopenDialogAfterTie is false only on the auto-bind path, where no dialog
+// was open to reopen. It therefore doubles as "was this automatic", which is
+// what decides whether the flag's original position is worth remembering.
 async function bindFlagToRoute(candidates, reopenDialogAfterTie = true) {
   let chosen = candidates[0];
   // Only ambiguous if the two closest are within the tie threshold of
@@ -3235,6 +3348,15 @@ async function bindFlagToRoute(candidates, reopenDialogAfterTie = true) {
   }
   const wp = editingFlag.wp;
   try {
+    // Remembered before the move, and only for an automatic bind. The flag is
+    // about to be snapped onto the route line, and for an auto-bind the user
+    // never agreed to that, so unbinding has to be able to put it back exactly
+    // where it was dropped. Recorded once: re-binding an already-moved flag
+    // must not overwrite the true original with an intermediate position.
+    if (!reopenDialogAfterTie && typeof wp.preBindLat !== 'number') {
+      wp.preBindLat = wp.lat;
+      wp.preBindLng = wp.lng;
+    }
     wp.lat = chosen.proj.projected.lat;
     wp.lng = chosen.proj.projected.lng;
     wp.boundRouteId = chosen.route.id;
@@ -3263,13 +3385,34 @@ document.getElementById('btn-unbind-flag').onclick = async () => {
   try {
     wp.boundRouteId = null;
     wp.routeDistance = null;
+
+    // Put the flag back exactly where it was dropped, if that is known.
+    // Only auto-bound flags carry this, so a manually bound one stays on the
+    // route line, which is what the user asked for when they bound it.
+    // Anything bound before this existed has no stored position and simply
+    // keeps its current one rather than being moved to a guess.
+    let restored = false;
+    if (typeof wp.preBindLat === 'number' && typeof wp.preBindLng === 'number') {
+      wp.lat = wp.preBindLat;
+      wp.lng = wp.preBindLng;
+      restored = true;
+    }
+    // Cleared either way: keeping it would mean a later auto-bind saw a stale
+    // "original" from a previous binding and restored to the wrong place.
+    wp.preBindLat = null;
+    wp.preBindLng = null;
+
     await Store.saveWaypoint(wp);
+    if (restored) {
+      editingFlag.marker.setLatLng([wp.lat, wp.lng]);
+      showToast('Flag moved back to where you dropped it.');
+    }
     // wp.iconType, not the module-level editingFlagIconType, for the same
     // reason spelled out in bindFlagToRoute. Unbind does not commit an
     // unsaved icon choice, so trusting the picker's live value would leave
     // the marker showing an icon that does not match what was just persisted.
     editingFlag.marker.setIcon(buildFlagDivIcon(wp.iconType, false));
-    logInfo(`Flag "${wp.name}" unbound from its route.`);
+    logInfo(`Flag "${wp.name}" unbound${restored ? ' and restored to its original position' : ''}.`);
   } catch (e) {
     logError(`Failed to unbind flag: ${e.message}`);
   }
@@ -4431,6 +4574,9 @@ function endRecording() {
 
 // ---------- Region download ----------
 let selectedRegion = null;
+// True once a download of the current selection has completed, so the button
+// can stay disabled until a different area is chosen.
+let downloadFinished = false;
 
 function renderDownloadLayerChecks() {
   const container = document.getElementById('download-layer-checks');
@@ -4480,6 +4626,16 @@ function selectRegion(result) {
   const b = result.bbox;
   map.fitBounds([[b.south, b.west], [b.north, b.east]]);
   updateEstimate();
+
+  // A new area means the previous download no longer describes what is
+  // selected, so the button and the progress bar both reset.
+  downloadFinished = false;
+  const startBtn = document.getElementById('btn-start-download');
+  startBtn.textContent = 'Start download';
+  startBtn.disabled = false;
+  document.getElementById('progress-fill').style.width = '0%';
+  document.getElementById('progress-text').textContent = '';
+
   logInfo(`Region selected: ${result.label}`);
 }
 
@@ -4555,6 +4711,14 @@ document.getElementById('btn-start-download').onclick = async () => {
         renderRegionsList('saved-map-regions-list-download', 'tile-cache-stats-download');
       }
     });
+    // Only reached when the download completed without throwing. The button
+    // stays disabled and says so, because tapping it again would re-run the
+    // same selection and report a second download that fetched nothing. It
+    // comes back when a new area is searched.
+    downloadFinished = true;
+    startBtn.textContent = 'Downloaded';
+    startBtn.disabled = true;
+    return;
   } catch (e) {
     logError(`Download failed: ${e.message}`);
   } finally {
@@ -4562,15 +4726,78 @@ document.getElementById('btn-start-download').onclick = async () => {
     // fires on success, so a thrown download would otherwise leave the button
     // permanently disabled and reading "Downloading", with no way to retry
     // short of restarting the app.
-    startBtn.textContent = 'Start download';
-    startBtn.disabled = false;
+    if (!downloadFinished) {
+      startBtn.textContent = 'Start download';
+      startBtn.disabled = false;
+    }
   }
 };
 
+// True when `outer` covers every tile `inner` could contain: its box encloses
+// inner's, its zoom range spans inner's, and it has at least inner's layers.
+// All three matter. A box that contains another but was downloaded at fewer
+// layers or a narrower zoom range does not make the smaller one redundant.
+function regionSupersedes(outer, inner) {
+  const a = outer.bbox, b = inner.bbox;
+  if (!a || !b) return false;
+  const encloses = a.north >= b.north && a.south <= b.south && a.east >= b.east && a.west <= b.west;
+  if (!encloses) return false;
+  if ((outer.minZoom ?? 0) > (inner.minZoom ?? 0)) return false;
+  if ((outer.maxZoom ?? 0) < (inner.maxZoom ?? 0)) return false;
+  const outerLayers = new Set(outer.layerIds || []);
+  return (inner.layerIds || []).every(l => outerLayers.has(l));
+}
+
+function sameBbox(a, b) {
+  if (!a || !b) return false;
+  const near = (x, y) => Math.abs(x - y) < 1e-9;
+  return near(a.north, b.north) && near(a.south, b.south) && near(a.east, b.east) && near(a.west, b.west);
+}
+
+// Saves a region, folding it into what is already recorded instead of always
+// appending. Two cases, which between them cover how people actually
+// re-download:
+//
+//   Same area, different layers. Downloading Tucson with satellite and then
+//   with topo produced two entries that looked like two downloads. They are
+//   merged into one record listing both layers.
+//
+//   Larger area covering a smaller one. Downloading Pima County after Tucson
+//   left a Tucson entry that no longer described anything distinct, since
+//   every tile it named is inside the county. The smaller record is removed.
+//
+// Tile-level deduplication already worked, so none of this changes what gets
+// fetched. It changes what the list claims was downloaded.
 function saveRegionRecord(region) {
   const regions = JSON.parse(localStorage.getItem('savedRegions') || '[]');
-  regions.push({ ...region, savedAt: Date.now() });
-  localStorage.setItem('savedRegions', JSON.stringify(regions));
+  const incoming = { ...region, savedAt: Date.now() };
+
+  // Same footprint: merge rather than add. Union of layers and the widest
+  // zoom range, because between the two downloads that is what is on disk.
+  const twin = regions.find(r => sameBbox(r.bbox, incoming.bbox));
+  if (twin) {
+    twin.layerIds = Array.from(new Set([...(twin.layerIds || []), ...(incoming.layerIds || [])]));
+    twin.minZoom = Math.min(twin.minZoom ?? incoming.minZoom, incoming.minZoom ?? twin.minZoom);
+    twin.maxZoom = Math.max(twin.maxZoom ?? incoming.maxZoom, incoming.maxZoom ?? twin.maxZoom);
+    twin.savedAt = incoming.savedAt;
+    twin.label = twin.label || incoming.label;
+    localStorage.setItem('savedRegions', JSON.stringify(regions));
+    return;
+  }
+
+  // An existing record that already covers this one entirely: nothing new was
+  // recorded, so the timestamp moves and no second entry appears.
+  const covering = regions.find(r => regionSupersedes(r, incoming));
+  if (covering) {
+    covering.savedAt = incoming.savedAt;
+    localStorage.setItem('savedRegions', JSON.stringify(regions));
+    return;
+  }
+
+  // Otherwise add it, and drop anything it now fully covers.
+  const kept = regions.filter(r => !regionSupersedes(incoming, r));
+  kept.push(incoming);
+  localStorage.setItem('savedRegions', JSON.stringify(kept));
 }
 function getSavedRegions() {
   return JSON.parse(localStorage.getItem('savedRegions') || '[]');
