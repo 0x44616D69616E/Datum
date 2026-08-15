@@ -1,5 +1,5 @@
 {
-  "appId": "com.alienwizard.cairn",
+  "appId": "org.freemaps.datum",
   "appName": "Datum",
   "webDir": "www",
   "bundledWebRuntime": false,
