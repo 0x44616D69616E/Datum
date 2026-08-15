@@ -1,0 +1,20 @@
+A fully offline topographic, satellite and trail map for Android, built for the moment you lose signal and still need to know where you are.
+
+Download a region before you leave and everything keeps working with no connection: the map, GPS position, waypoints, route planning and track recording. Satellite imagery, USGS topographic contours, trails, public land ownership, borders and street labels are all cached on the device rather than fetched on demand.
+
+Features:
+
+* Seven map layers that can be reordered, hidden, and given independent transparency, so contours can be read through imagery
+* Public land ownership from the BLM Surface Management Agency dataset, showing BLM, Forest Service, state, tribal and private land
+* USGS topographic contours labelled in feet, plus OpenTopoMap in metres
+* Waypoints with thirteen icon types, undo and redo
+* Route planning, either point by point or by connecting waypoints, with trimming and turn by turn navigation
+* Track recording with live distance and elapsed time
+* Sessions, so each trip's waypoints, routes and tracks stay separate
+* Layer presets that can be saved and shared, containing settings only and no locations
+
+Your data is written to a folder you choose as standard GPX files as you create them, so it opens in other outdoor applications with no export step, and nothing is locked in a proprietary format. Timestamps are left out of shared files by default, because a path shows where a trail goes while timestamps also show what hours you were out.
+
+There is no account, no advertising, no analytics and no server.
+
+Note on the anti-feature flag: the satellite imagery layer is served by Esri, and the optional weather radar layer by RainViewer. Both are proprietary services. Every other layer comes from public domain government or openly licensed sources. Place search uses Nominatim. All network access is initiated by the user; nothing is contacted in the background.
