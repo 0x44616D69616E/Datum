@@ -11,6 +11,8 @@ No account. No analytics. Nothing you record is uploaded anywhere. Your waypoint
 Free, no ads, no account, no subscription, no tracking. 6.4 MB.
 [All releases](https://github.com/0x44616D69616E/Datum/releases) · [Installation help](https://freemaps.org)
 
+**New here? The [User Manual](MANUAL.md) covers every feature, setting and tool in detail.**
+
 
 ## Screenshots
 
@@ -143,6 +145,10 @@ Datum is MIT licensed and free. There is no sign-up, no subscription, no analyti
 - **Unbinding a flag puts it back where you dropped it.** Dropping a flag near a route binds it automatically and snaps it onto the line; unbinding now undoes the move as well as the binding.
 
 Full history is in [CHANGELOG.md](CHANGELOG.md), and older releases are listed under [Releases](https://github.com/0x44616D69616E/Datum/releases).
+
+## Documentation
+
+The [User Manual](MANUAL.md) documents everything: every layer, every setting, waypoint binding, route trimming, sessions, the file layout, importing, sharing and privacy options, and what to do when storage goes wrong. Start with [First run](MANUAL.md#first-run) and [Before you lose signal](MANUAL.md#before-you-lose-signal).
 
 ## Where your data lives
 
