@@ -15,7 +15,7 @@ Free, no ads, no account, no subscription, no tracking. 6.4 MB.
 ## Screenshots
 
 <p align="center">
-  <img src="docs/screenshots/route-satellite.jpg" width="340" alt="A route with waypoints drawn over satellite imagery, with a route popup showing distance and actions">
+  <img src="docs/screenshots/route-satellite.jpg" width="440" alt="A route with waypoints drawn over satellite imagery, with a route popup showing distance and actions">
 </p>
 
 <p align="center"><i>A planned route with bound waypoints over satellite imagery, fully offline.</i></p>
@@ -26,7 +26,7 @@ Free, no ads, no account, no subscription, no tracking. 6.4 MB.
 <br>
 
 <p align="center">
-  <img src="docs/screenshots/public-land.jpg" width="340" alt="Public land ownership layer with its colour legend open">
+  <img src="docs/screenshots/public-land.jpg" width="400" alt="Public land ownership layer with its colour legend open">
 </p>
 
 **See whose land you are standing on.** BLM Surface Management Agency data, colour coded and available offline. If you hunt, this is the layer that matters.
@@ -34,7 +34,7 @@ Free, no ads, no account, no subscription, no tracking. 6.4 MB.
 <br>
 
 <p align="center">
-  <img src="docs/screenshots/layers.jpg" width="340" alt="The layer list with visibility checkboxes and transparency sliders">
+  <img src="docs/screenshots/layers.jpg" width="400" alt="The layer list with visibility checkboxes and transparency sliders">
 </p>
 
 **Stack the layers you want.** Drag to reorder, toggle visibility, set transparency on each one independently, and save the result as a named preset.
@@ -42,7 +42,7 @@ Free, no ads, no account, no subscription, no tracking. 6.4 MB.
 <br>
 
 <p align="center">
-  <img src="docs/screenshots/waypoint-icons.jpg" width="340" alt="The waypoint icon picker open over USGS topo contours">
+  <img src="docs/screenshots/waypoint-icons.jpg" width="400" alt="The waypoint icon picker open over USGS topo contours">
 </p>
 
 **Thirteen waypoint types**, over USGS contours that read in feet. Water, shelter, camp, food, power, parking, photo spot, hazard, and more.
@@ -50,7 +50,7 @@ Free, no ads, no account, no subscription, no tracking. 6.4 MB.
 <br>
 
 <p align="center">
-  <img src="docs/screenshots/trim-route.jpg" width="340" alt="The route trimming panel with start and end sliders and a live preview">
+  <img src="docs/screenshots/trim-route.jpg" width="400" alt="The route trimming panel with start and end sliders and a live preview">
 </p>
 
 **Trim a route from either end**, with a live preview on the map as you drag. The panel is draggable, so it never covers the part you are judging.
@@ -58,7 +58,7 @@ Free, no ads, no account, no subscription, no tracking. 6.4 MB.
 <br>
 
 <p align="center">
-  <img src="docs/screenshots/glass-theme.jpg" width="340" alt="The optional translucent liquid glass theme over a public land ownership map">
+  <img src="docs/screenshots/glass-theme.jpg" width="400" alt="The optional translucent liquid glass theme over a public land ownership map">
 </p>
 
 **An optional liquid glass theme.** Translucent panels that keep the map visible behind them. Off by default; the solid Classic look is unchanged.
