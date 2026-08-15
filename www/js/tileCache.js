@@ -46,17 +46,80 @@ export async function getTileBlob(layerId, z, x, y) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readonly');
     const req = tx.objectStore(STORE_NAME).get(tileKey(layerId, z, x, y));
-    req.onsuccess = () => resolve(req.result || null);
+    req.onsuccess = () => {
+      const v = req.result;
+      if (!v) return resolve(null);
+      // Tiles are now stored as { blob, source }, but entries written before
+      // that are bare blobs. Unwrapping here keeps every caller unchanged and
+      // means no migration pass is needed.
+      resolve(v && typeof v === 'object' && 'blob' in v ? v.blob : v);
+    };
     req.onerror = () => reject(req.error);
   });
 }
 
-export async function putTileBlob(layerId, z, x, y, blob) {
+// Tiles arrive two ways: fetched deliberately by a region download, or picked
+// up opportunistically while panning the map. Telling them apart afterwards
+// would mean expanding every saved region's bbox and zoom range back into tile
+// coordinates and comparing, which is expensive and approximate. Recording the
+// source at write time is exact and costs nothing.
+//
+// Stored as a wrapper object rather than a bare blob, so existing untagged
+// entries stay readable: getTileBlob unwraps either shape.
+export async function putTileBlob(layerId, z, x, y, blob, source = 'browse') {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readwrite');
-    tx.objectStore(STORE_NAME).put(blob, tileKey(layerId, z, x, y));
+    tx.objectStore(STORE_NAME).put({ blob, source }, tileKey(layerId, z, x, y));
     tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// Removes only tiles cached while browsing, leaving deliberate downloads
+// alone. Untagged entries predate this and are treated as browsing: a saved
+// region can always be downloaded again from its record, whereas a stray
+// browsing tile has no record and would otherwise never be clearable except
+// by wiping everything.
+export async function clearBrowseCache() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    const req = store.openCursor();
+    let removed = 0;
+    req.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (!cursor) return;
+      const v = cursor.value;
+      const source = v && typeof v === 'object' && 'source' in v ? v.source : 'browse';
+      if (source !== 'region') { cursor.delete(); removed++; }
+      cursor.continue();
+    };
+    tx.oncomplete = () => resolve(removed);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// Counts and approximate size of the browse-only portion, for the button that
+// clears it. Size is estimated from blob sizes rather than measured, which is
+// the same basis the existing aggregate uses.
+export async function getBrowseCacheStats() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const req = tx.objectStore(STORE_NAME).openCursor();
+    let count = 0, bytes = 0;
+    req.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (!cursor) return;
+      const v = cursor.value;
+      const source = v && typeof v === 'object' && 'source' in v ? v.source : 'browse';
+      const blob = v && typeof v === 'object' && 'blob' in v ? v.blob : v;
+      if (source !== 'region') { count++; bytes += (blob && blob.size) || 0; }
+      cursor.continue();
+    };
+    tx.oncomplete = () => resolve({ count, bytes });
     tx.onerror = () => reject(tx.error);
   });
 }
@@ -331,7 +394,7 @@ async function downloadSingleTile({ layerId, z, x, y }) {
     throw new Error(`Tile fetch failed (${res.status}) for ${layerId} z${z}/x${x}/y${y}`);
   }
   const blob = await res.blob();
-  await putTileBlob(layerId, z, x, y, blob);
+  await putTileBlob(layerId, z, x, y, blob, 'region');
 }
 
 function latLngToTile(lat, lng, z) {

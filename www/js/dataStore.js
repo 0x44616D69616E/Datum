@@ -202,7 +202,7 @@ export async function hasAnyCurrentData() {
 // Acts as an upsert: pass an object with an existing `id` to update it in
 // place (used for renaming and renumbering), or omit `id` to create a new
 // flag with a fresh one.
-export async function saveWaypoint({ id, lat, lng, name, notes, iconType, createdAt, boundRouteId, routeDistance }) {
+export async function saveWaypoint({ id, lat, lng, name, notes, iconType, createdAt, boundRouteId, routeDistance, preBindLat, preBindLng }) {
   const rec = await putRecord('waypoints', {
     id: id || uid(),
     lat, lng, name, notes,
@@ -215,7 +215,16 @@ export async function saveWaypoint({ id, lat, lng, name, notes, iconType, create
     // instead of re-projecting every bound flag onto the route on every
     // GPS tick.
     boundRouteId: boundRouteId ?? null,
-    routeDistance: typeof routeDistance === 'number' ? routeDistance : null
+    routeDistance: typeof routeDistance === 'number' ? routeDistance : null,
+    // Where the flag was actually dropped, recorded only when auto-bind moved
+    // it. Binding snaps a flag onto the route line, and auto-bind does that
+    // without being asked, so it owes the user a way back. A manual bind was
+    // a deliberate choice and needs no undo of its position.
+    //
+    // Local to the database on purpose: this is never exported, because a GPX
+    // should describe where a flag is, not where it used to be.
+    preBindLat: typeof preBindLat === 'number' ? preBindLat : null,
+    preBindLng: typeof preBindLng === 'number' ? preBindLng : null
   });
   notify('waypoints', 'save', rec);
   return rec;
