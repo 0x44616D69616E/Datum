@@ -2,6 +2,39 @@
 
 All notable changes to Datum are documented here.
 
+## v1.6.0
+
+### Added
+
+- **The compass button now does three things.** Tap it while the map is
+  rotated and it straightens to north. Tap it again and the map locks to the
+  direction you are facing. Tap once more to unlock and return to north. Hold
+  it to lock straight away without straightening first.
+- **The compass ribbon is on by default.** Turning it off in Settings is
+  remembered.
+- **Clear browsing cache**, in Settings. Panning the map caches tiles as you
+  go, separately from areas you download deliberately. This clears those and
+  shows how much space they are using, without touching your downloads.
+- **A way to support the project** in Settings, for anyone who wants to. Datum
+  stays free either way.
+
+### Changed
+
+- **Downloading an area no longer adds a duplicate entry.** Downloading a
+  larger area that covers one you already have replaces the smaller record,
+  and downloading the same area again with different layers merges them into
+  one entry rather than listing it twice.
+- **The download button now stays disabled after finishing**, and comes back
+  when you search for a new area. It used to invite you to download the same
+  selection again.
+
+### Fixed
+
+- **Unbinding a flag now puts it back where you dropped it.** Dropping a flag
+  near a route binds it automatically and snaps it onto the line, which you
+  never asked for; unbinding now returns it to its original position. Flags
+  you bound deliberately stay where they are, since moving them was the point.
+
 ## v1.5.0
 
 ### Added
