@@ -1,10 +1,10 @@
 {
   "name": "datum",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "description": "Datum - a fully offline GIS-style topo/satellite/trail map with GPS, waypoints, and route recording",
   "scripts": {
     "sync": "npx cap sync android",
-    "fix-manifest": "node scripts/ensure-manifest-permissions.js && node scripts/ensure-storage-plugin.js && node scripts/ensure-compass-plugin.js && node scripts/ensure-gpx-intent.js && node scripts/ensure-branding.js && node scripts/ensure-version.js",
+    "fix-manifest": "node scripts/ensure-manifest-permissions.js && node scripts/ensure-storage-plugin.js && node scripts/ensure-compass-plugin.js && node scripts/ensure-gpx-intent.js && node scripts/ensure-branding.js && node scripts/ensure-version.js && node scripts/ensure-signing.js",
     "open:android": "npx cap open android",
     "add:android": "npx cap add android",
     "build:android": "node scripts/prepare-android.js"
