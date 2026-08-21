@@ -1,97 +1,46 @@
 // gps.js
 //
-// Wraps location access so the rest of the app doesn't care whether it's
-// running inside the Capacitor native shell (real GPS chip access via the
-// Geolocation plugin) or in a plain browser during development (falls back
-// to the standard Web Geolocation API). Both read the actual hardware GPS,
-// not network-based location, when available - critical for the "works
-// with zero signal" requirement.
+// Wraps location access using the Web Geolocation API, available inside
+// Capacitor's WebView the same as in any other browser. Reads the actual
+// hardware GPS, not network-based location, when available - critical for
+// the "works with zero signal" requirement.
+//
+// This used to branch on the @capacitor/geolocation plugin for finer control
+// over Android's LocationRequest. That plugin's Android module hard-links a
+// Google Play Services location library, which F-Droid's scanner rejects
+// outright, so it was removed. Capacitor's own Bridge, not the
+// plugin, is what enables WebView geolocation
+// (Bridge.java: settings.setGeolocationEnabled(true)) and requests the
+// ACCESS_COARSE_LOCATION/ACCESS_FINE_LOCATION runtime permission via
+// BridgeWebChromeClient.onGeolocationPermissionsShowPrompt the first time
+// watchPosition() is called below, so removing the plugin does not remove
+// the permission prompt, confirmed directly against Capacitor's source
+// rather than assumed. What IS lost: the plugin exposed
+// minimumUpdateInterval and a maxUpdateDelay batching window that kept the
+// marker from lagging behind real movement; the plain Web API has no
+// equivalent knob, and update cadence now follows whatever interval the
+// platform's own location provider defaults to. Its `timeout` is a genuine
+// error timeout, unlike the plugin's batching-window meaning of the same
+// name, so it stays generous here rather than short. Watch for GPS feeling
+// less responsive than before on real hardware; there is nothing left to
+// tune if so, it would mean revisiting this decision, not adjusting a value.
 
 let watchId = null;
-// Holds the still-unresolved watchPosition() promise while a registration is
-// in flight. Without this, watchId is null for the whole gap between calling
-// watchPosition and its promise resolving, so a teardown landing inside that
-// window finds nothing to clear and silently leaks the watch that is about
-// to register. stopWatching() awaits this first so it always has the real id.
-let watchPending = null;
-// Tail of the resync queue. See resync() for why overlapping calls have to be
-// serialised rather than just individually awaited.
-let resyncChain = Promise.resolve();
 let onUpdateCallback = null;
-let CapGeo = null;
-
-// Capacitor's plugin registers itself globally at runtime inside the
-// native shell. We try to grab it, and silently fall back to the browser
-// API if it's not present (e.g. running this in a desktop browser to test
-// the UI).
-try {
-  // eslint-disable-next-line no-undef
-  CapGeo = Capacitor?.Plugins?.Geolocation || null;
-} catch (e) {
-  CapGeo = null;
-}
+// Tail of the resync queue. Kept even though watchPosition/clearWatch are
+// synchronous now (unlike the old plugin's native-bridge calls, which is
+// what originally motivated this), because stopWatching() is still async
+// and still yields at least one microtask between tearing down the old
+// watch and registering the new one. Three separate controls call resync()
+// (the resync button, the locate button, tapping your own marker), so cheap
+// insurance against two of them landing in that gap is still worth keeping.
+let resyncChain = Promise.resolve();
 
 function startWatchInternal() {
-  if (CapGeo) {
-    // Wrapped in try/catch deliberately: a single uncaught error here would
-    // otherwise stop every remaining line of app.js from executing (this is
-    // exactly what happened before - a crash here silently killed flags,
-    // routes, tracking, and downloads too, since none of that wiring code
-    // ever got a chance to run).
-    try {
-      const result = CapGeo.watchPosition(
-        // Every value here matters more than it looks, because of how the
-        // Capacitor plugin maps them onto Android's LocationRequest:
-        //
-        //   maximumAge: 0        - never accept a cached fix. (An earlier
-        //     version used 2000, which does NOT cap staleness as the name
-        //     suggests; it explicitly PERMITS a position up to 2s old.)
-        //
-        //   minimumUpdateInterval - becomes setMinUpdateIntervalMillis.
-        //     The plugin DEFAULTS THIS TO 5000, so leaving it out caps
-        //     position updates at one every five seconds no matter what
-        //     else is configured. This was the dominant cause of the
-        //     marker lagging behind real movement.
-        //
-        //   timeout              - becomes setMaxUpdateDelayMillis, which
-        //     is Android's batching window, NOT an error timeout on this
-        //     path. At 10000 the OS was allowed to hold updates for up to
-        //     ten seconds and deliver them in a batch. Setting it below
-        //     the update interval effectively disables batching, which is
-        //     what live tracking wants.
-        { enableHighAccuracy: true, timeout: 2000, maximumAge: 0, minimumUpdateInterval: 1000 },
-        (position, err) => {
-          if (err) {
-            notifyUpdate({ error: err.message || String(err) });
-            return;
-          }
-          if (position) emit(position);
-        }
-      );
-
-      // Some Capacitor plugin registration paths don't return a real
-      // Promise from watchPosition depending on how the bridge proxy is
-      // set up - only chain .then if we actually got a thenable back.
-      if (result && typeof result.then === 'function') {
-        watchPending = result;
-        result.then((id) => {
-          watchId = id;
-          watchPending = null;
-        }).catch((e) => {
-          watchPending = null;
-          notifyUpdate({ error: `watchPosition setup failed: ${e.message || e}` });
-        });
-      }
-    } catch (e) {
-      notifyUpdate({ error: `Geolocation plugin error: ${e.message || e}` });
-    }
-  } else if (navigator.geolocation) {
+  if (navigator.geolocation) {
     watchId = navigator.geolocation.watchPosition(
       (position) => emit(position),
       (err) => notifyUpdate({ error: err.message }),
-      // Unlike the native path above, `timeout` here is a genuine error
-      // timeout, so it stays generous - a short one would spuriously fail
-      // indoors or on a cold start.
       { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
     );
   } else {
@@ -116,34 +65,21 @@ export function startWatching(onUpdate) {
 // (tree cover, canyon walls, being between buildings) - that's physical,
 // not a state that restarting clears.
 //
-// Must await the teardown before registering the replacement. When these two
-// ran fire-and-forget, the old watch's clearWatch and the new watch's
-// registration were both in flight natively with no defined ordering, so the
-// teardown could land last and kill the watch that had just been created.
-// Nothing then ever delivered a position, and since status only returns to
-// 'locked' on a real position callback, the UI sat on "Resyncing" forever.
-//
-// Serialised through a promise chain because three separate controls call
-// this (the resync button, the locate button, and tapping your own marker),
-// so two resyncs can genuinely overlap. Awaiting inside a single call is not
-// enough on its own: two concurrent calls would each await the same pending
-// registration, then one would clear the watch and the other would find
-// watchId already null, clear nothing, and start a second watch anyway.
-// That strands a live watch with no id anyone holds, which keeps the GPS
-// chip awake and interleaves fixes from two watches into one marker.
+// Historically this had to await the teardown before registering the
+// replacement, because the old plugin's clearWatch and watchPosition calls
+// were both in flight natively with no defined ordering between them, and a
+// teardown landing last could kill the watch that had just been created,
+// leaving the UI stuck on "Resyncing" forever with no position ever
+// arriving again (status only returns to 'locked' on a real position
+// callback). navigator.geolocation's clearWatch/watchPosition are
+// synchronous, so that specific race is gone, but resyncChain stays as
+// cheap serialisation against the three controls that call this (the
+// resync button, the locate button, tapping your own marker) landing in
+// the one remaining microtask gap inside stopWatching().
 export function resync() {
   resyncChain = resyncChain.then(async () => {
     await stopWatching();
     startWatchInternal();
-    // Hold the queue until the new registration resolves, so the next
-    // resync's teardown has a real id to clear rather than racing it.
-    if (watchPending) {
-      try {
-        await watchPending;
-      } catch (e) {
-        // Already surfaced by startWatchInternal's own catch.
-      }
-    }
   }).catch((e) => {
     // A rejection here would poison the chain and make every later resync a
     // no-op, which is the same silent dead-end this fix exists to remove.
@@ -166,35 +102,14 @@ function emit(position) {
 }
 
 export async function stopWatching() {
-  // If a registration is still in flight, wait for its id rather than
-  // tearing down nothing and leaving an orphaned watch running.
-  if (watchPending) {
-    try {
-      await watchPending;
-    } catch (e) {
-      // Registration failed, so there is nothing to tear down. The error was
-      // already surfaced by startWatchInternal's own catch.
-    }
-  }
-
   const id = watchId;
-  // Cleared synchronously, before the await below yields, so a watch
-  // registered during the teardown cannot have its id overwritten by this
-  // call, and a second stopWatching cannot try to clear the same id twice.
+  // Cleared before checking, so a watch registered during this call cannot
+  // have its id overwritten, and a second stopWatching cannot try to clear
+  // the same id twice.
   watchId = null;
   if (id == null) return;
 
-  if (CapGeo) {
-    try {
-      await CapGeo.clearWatch({ id });
-    } catch (e) {
-      // Deliberately swallowed rather than routed through notifyUpdate: the
-      // caller is about to start a fresh watch, and flagging GPS as errored
-      // here would show a failure the user is not actually experiencing. A
-      // leaked watch is the lesser problem.
-      console.warn(`clearWatch failed for id ${id}:`, e);
-    }
-  } else if (navigator.geolocation) {
+  if (navigator.geolocation) {
     navigator.geolocation.clearWatch(id);
   }
 }
