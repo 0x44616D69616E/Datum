@@ -1,0 +1,13 @@
+{
+	"appId": "org.freemaps.datum",
+	"appName": "Datum",
+	"webDir": "www",
+	"bundledWebRuntime": false,
+	"plugins": {
+		"Geolocation": {
+			"permissions": [
+				"location"
+			]
+		}
+	}
+}
