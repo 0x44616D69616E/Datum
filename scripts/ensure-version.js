@@ -22,6 +22,22 @@
  * major * 10000 + minor * 100 + patch. 1.6.1 becomes 10601. That allows 99
  * minor and 99 patch releases per major, and stays comfortably inside
  * Android's limit of 2100000000.
+ *
+ * Also writes .versioncode, a single-line committed file containing just
+ * this packed integer. F-Droid's checkupdates never runs a build; it reads
+ * the raw checkout at each tag, and android/app/build.gradle does not exist
+ * there since it is generated output, never committed (see prepare-android.js
+ * and package.json's build:android script). checkupdates supports pointing
+ * UpdateCheckData at an arbitrary committed file instead of assuming
+ * build.gradle, but its regex can only return a single capture group, and
+ * that group cannot compute major*10000+minor*100+patch from a plain semver
+ * string like "1.6.3" by regex alone. Writing the already-computed integer
+ * to its own file sidesteps that: UpdateCheckData points at .versioncode for
+ * the code half and package.json for the name half, neither needing math.
+ *
+ * Unlike the build.gradle write below, this one is unconditional and does
+ * not require android/ to exist yet, since .versioncode has to be correct
+ * and committed independent of whether anyone has ever run a build.
  */
 
 const fs = require('fs');
@@ -29,11 +45,7 @@ const path = require('path');
 
 const root = path.resolve(__dirname, '..');
 const gradlePath = path.join(root, 'android', 'app', 'build.gradle');
-
-if (!fs.existsSync(gradlePath)) {
-  console.log('No android/app/build.gradle yet, skipping version sync.');
-  process.exit(0);
-}
+const versionCodePath = path.join(root, '.versioncode');
 
 const { version } = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 
@@ -51,6 +63,23 @@ if (minor > 99 || patch > 99) {
   process.exit(1);
 }
 const versionCode = major * 10000 + minor * 100 + patch;
+
+// Unconditional: this file is committed and has to be right regardless of
+// whether android/ has ever been generated on this machine.
+const versionCodeContent = `${versionCode}\n`;
+if (!fs.existsSync(versionCodePath) || fs.readFileSync(versionCodePath, 'utf8') !== versionCodeContent) {
+  fs.writeFileSync(versionCodePath, versionCodeContent);
+  console.log(`.versioncode set to ${versionCode}.`);
+} else {
+  console.log(`.versioncode already at ${versionCode}.`);
+}
+
+// Everything below requires android/app/build.gradle, which only exists
+// after a build has actually generated it.
+if (!fs.existsSync(gradlePath)) {
+  console.log('No android/app/build.gradle yet, skipping build.gradle sync.');
+  process.exit(0);
+}
 
 let gradle = fs.readFileSync(gradlePath, 'utf8');
 const before = gradle;
