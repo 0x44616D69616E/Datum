@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Datum</title>
+
+<link rel="stylesheet" href="lib/leaflet/leaflet.css" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- Top search bar -->
+<div id="topbar">
+  <button id="btn-search" class="icon-btn" data-icon="search" title="Search"></button>
+  <input id="search-input" type="text" placeholder="Search any place, address, or lat,lng" />
+  <button id="btn-settings" class="icon-btn" data-icon="settings" title="Settings"></button>
+</div>
+<button id="status-chip" data-popover-trigger title="GPS status">
+  <span id="gps-dot" class="gps-dot hidden"></span>
+  <span id="gps-spinner" class="gps-spinner" data-icon="sync"></span>
+  <span id="gps-status">GPS</span>
+</button>
+
+<!-- GPS detail popover - opened by tapping the GPS chip. The chip itself
+     is deliberately just a dot: the numbers that actually tell you
+     whether to trust the position live in here. -->
+<div id="popover-gps" class="popover hidden">
+  <div class="popover-row"><span class="popover-label">Status</span><span id="gps-popover-status">Searching</span></div>
+  <div class="popover-row"><span class="popover-label">Accuracy</span><span id="gps-popover-accuracy">&mdash;</span></div>
+  <div class="popover-row"><span class="popover-label">Position</span><span id="gps-popover-coords">&mdash;</span></div>
+  <div class="popover-row"><span class="popover-label">Elevation</span><span id="gps-popover-elevation">&mdash;</span></div>
+  <div class="popover-row"><span class="popover-label">Updated</span><span id="gps-popover-age">&mdash;</span></div>
+  <button id="btn-gps-resync" class="btn-secondary full-width">Resync GPS</button>
+</div>
+
+<!-- North calibration popover - opened by tapping the compass ribbon. -->
+<div id="popover-compass" class="popover hidden">
+  <p class="hint popover-warning hidden" id="compass-popover-warning">The sensor is reporting low confidence. Hold the phone clear of metal and magnets and move it in a figure-8 a few times.</p>
+  <p class="hint" id="north-offset-status"></p>
+  <div class="button-row">
+    <button id="btn-set-north" class="btn-secondary">Set north</button>
+    <button id="btn-reset-north" class="btn-secondary">Reset</button>
+  </div>
+  <p class="hint">Point the top of your phone at north, then tap <strong>Set north</strong>. The ribbon keeps tracking live from the sensors either way - this only corrects which direction it calls north.</p>
+</div>
+
+<div id="search-results" class="hidden"></div>
+
+<!-- Compass ribbon: rotates with the real device compass sensor (not map
+     rotation), showing whichever heading you're currently facing centered
+     under the fixed pointer. Sits a row below the search bar/status chip
+     band so it never competes with the search results dropdown. -->
+<!-- Compass ribbon: driven by the real device compass sensor (not map
+     rotation). Sits directly below the search bar; the GPS chip and the
+     flag/route/record pills shift down to clear it when it's on, and take
+     that row back when it's off, so nothing is left as dead space (see
+     the --top-row-h variable in style.css).
+     The window/track split exists so the edge fade mask applies only to
+     the scrolling ticks - the pointer, readout and calibration warning
+     stay crisp instead of dissolving at the edges too. -->
+<div id="compass-ribbon" class="hidden" data-popover-trigger>
+  <div id="compass-ribbon-window">
+    <div id="compass-ribbon-track">
+      <div id="compass-nav-diamond" class="hidden"></div>
+    </div>
+  </div>
+  <div class="compass-ribbon-pointer"></div>
+  <div id="compass-heading-readout">---&deg;</div>
+  <span id="compass-calibrate-warn" class="hidden" data-icon="refresh"></span>
+</div>
+
+<!-- Floating action buttons - all collapsed behind a single menu toggle -->
+<div id="fab-stack">
+  <div id="fab-menu-items" class="fab-menu-items hidden">
+    <button id="btn-compass" class="fab compass-fab" title="Tap: straighten to north, then lock to your heading. Hold: lock straight away.">
+      <svg id="compass-needle" viewBox="0 0 40 40" width="30" height="30">
+        <circle cx="20" cy="20" r="18" fill="#171d26" stroke="#3a4655" stroke-width="1.5"/>
+        <polygon points="20,4 24,20 20,17 16,20" fill="#e6484f"/>
+        <polygon points="20,36 24,20 20,23 16,20" fill="#dfe6ec"/>
+      </svg>
+    </button>
+    <button id="btn-locate" class="fab" data-icon="locate" title="Center on my location"></button>
+    <button id="btn-layers" class="fab" data-icon="layers" title="Layers"></button>
+    <button id="btn-download" class="fab" data-icon="download" title="Download region"></button>
+    <button id="btn-data" class="fab" data-icon="folder" title="Sessions, routes, map data"></button>
+    <button id="btn-waypoint" class="fab" data-icon="flag" title="Flag mode"></button>
+    <button id="btn-route" class="fab" data-icon="route" title="Route mode"></button>
+    <button id="btn-record" class="fab" data-icon="record" title="Record track"></button>
+  </div>
+
+  <button id="btn-fab-menu" class="fab fab-menu-toggle" data-icon="menu" title="More"></button>
+</div>
+
+<!-- Shared backdrop for sheets and dialogs -->
+<div id="backdrop" class="hidden"></div>
+
+<!-- Layers sheet -->
+<div id="sheet-layers" class="sheet hidden">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><h2>Layers</h2><button class="icon-btn sheet-close" data-target="sheet-layers" data-icon="close"></button></div>
+  <div class="sheet-body">
+    <p class="hint">Top of the list renders on top of the map. Use the arrows to reorder, checkbox to show/hide, slider for transparency.</p>
+    <div id="layer-manager-list"></div>
+
+    <div class="data-section">
+      <h3>Layer presets</h3>
+      <p class="hint">Save the current order, visibility, and transparency of every layer as a named preset you can load again later. Saved presets are also written to your storage folder as small shareable files, containing layer settings only, no locations.</p>
+      <button id="btn-save-layer-preset" class="btn-primary full-width">Save current layers as preset</button>
+      <button id="btn-load-presets-from-folder" class="btn-secondary full-width">Load presets from folder</button>
+      <ul id="saved-layer-presets-list" class="data-list"></ul>
+    </div>
+  </div>
+</div>
+
+<!-- Download sheet -->
+<div id="sheet-download" class="sheet hidden">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><h2>Download region</h2><button class="icon-btn sheet-close" data-target="sheet-download" data-icon="close"></button></div>
+  <div class="sheet-body">
+    <p class="hint">Search a city, county, state, or country. Bigger areas mean bigger downloads, but fully usable offline once saved.</p>
+
+    <div class="search-row">
+      <input type="text" id="region-search-input" placeholder="e.g. Pima County, or France" />
+      <button id="btn-region-search" class="btn-primary">Search</button>
+    </div>
+
+    <div id="region-search-results"></div>
+
+    <div id="region-selected-info" class="hidden">
+      <p class="selected-label"><b id="region-selected-name"></b></p>
+      <label>Min zoom <input type="number" id="zoom-min" value="8" min="1" max="18" /></label>
+      <label>Max zoom <input type="number" id="zoom-max" value="14" min="1" max="18" /></label>
+      <div id="download-layer-checks" class="layer-checks"></div>
+      <div id="estimate-readout" class="hint"></div>
+      <div id="download-progress" class="hidden">
+        <div class="progress-bar"><div id="progress-fill"></div></div>
+        <span id="progress-text">0%</span>
+      </div>
+      <button id="btn-start-download" class="btn-primary full-width">Start download</button>
+    </div>
+
+    <div class="data-section">
+      <h3>Downloaded map areas</h3>
+      <p id="tile-cache-stats-download" class="hint"></p>
+      <ul id="saved-map-regions-list-download" class="data-list"></ul>
+      <button id="btn-delete-all-maps-download" class="btn-danger full-width">Delete all downloaded map data</button>
+    </div>
+  </div>
+</div>
+
+<!-- Data / Sessions sheet -->
+<div id="sheet-data" class="sheet hidden">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><h2>Sessions &amp; data</h2><button class="icon-btn sheet-close" data-target="sheet-data" data-icon="close"></button></div>
+  <div class="sheet-body">
+    <div class="data-section">
+      <h3>Current session: <span id="current-session-label">Unsaved</span></h3>
+      <div class="button-row">
+        <button id="btn-save-session" class="btn-primary">Save session</button>
+        <button id="btn-new-session" class="btn-secondary">New session</button>
+      </div>
+      <p class="hint">A session is your waypoints, routes, and tracks. Downloaded map data is always kept separately, no matter what.</p>
+      <div id="storage-alert" class="storage-alert hidden">
+      <div class="storage-alert-title">Some files could not be written</div>
+      <div class="hint" id="storage-alert-detail"></div>
+      <div class="hint">The usual cause is Datum losing permission to write to storage, or the folder being moved or deleted.</div>
+      <button id="btn-storage-retry" class="btn-danger full-width">Try again</button>
+      <button id="btn-storage-permissions" class="btn-secondary full-width">Check storage permissions</button>
+    </div>
+
+    <div class="button-row">
+        <button id="btn-tree-select" class="btn-secondary">Select</button>
+        <button id="btn-tree-delete" class="btn-danger hidden">Delete selected</button>
+      </div>
+      <ul id="session-tree" class="tree"></ul>
+    </div>
+
+    <div class="data-section">
+      <h3>Share &amp; import</h3>
+      <p class="hint">Your waypoints, routes and tracks are written to your storage folder as GPX automatically as you create them, so there is nothing to export for a backup. They live in <b>current/</b> until you save a session, then move into that session's own folder.</p>
+      <p class="hint">GPX is the standard outdoor format, so those files open in Garmin, Gaia GPS, CalTopo, OsmAnd and most handheld units. To bring a file in, drop it into <b>current/waypoints</b>, <b>current/routes</b> or <b>current/tracks</b> and use Import, or just tap the file and choose Datum.</p>
+      <label class="check-row">
+        <input type="checkbox" id="share-include-timestamps" />
+        <span>Include times<br><small>A path alone shows where a trail goes. Times also reveal when you were out.</small></span>
+      </label>
+      <label class="check-row">
+        <input type="checkbox" id="share-trim-enabled" />
+        <span>Trim the ends of tracks<br><small>Tracks often start and stop at home. Trimming keeps the useful middle without publishing where you live.</small></span>
+      </label>
+      <div id="share-trim-controls" class="trim-controls is-disabled">
+        <label class="slider-row">
+          <span class="slider-label">From the start</span>
+          <input type="range" id="share-trim-start" min="0" max="1000" step="25" value="0" disabled />
+          <output id="share-trim-start-out" class="slider-out">0</output>
+        </label>
+        <label class="slider-row">
+          <span class="slider-label">From the end</span>
+          <input type="range" id="share-trim-end" min="0" max="1000" step="25" value="0" disabled />
+          <output id="share-trim-end-out" class="slider-out">0</output>
+        </label>
+      </div>
+      <p class="hint">Packaging writes one GPX containing an entire session into that session's folder, which is the single file to send someone.</p>
+      <div class="button-row">
+        <button id="btn-package-session" class="btn-primary">Package session as one file</button>
+        <button id="btn-sync-storage" class="btn-secondary">Sync from folder</button>
+      </div>
+      <div class="button-row">
+        <button id="btn-import-browse" class="btn-secondary">Import a file</button>
+      </div>
+      <p class="hint">Sync picks up anything added to your Datum folder from outside the app. Copy a whole session folder into <b>sessions/</b> and it becomes a session; drop files into <b>current/waypoints</b>, <b>routes</b> or <b>tracks</b> and they join what you are working on. Files Datum wrote itself are recognised and left alone.</p>
+      <div class="button-row">
+        <button id="btn-tidy-storage" class="btn-secondary">Tidy up old folders</button>
+      </div>
+    </div>
+
+
+
+    <div class="data-section">
+      <h3>Layer presets</h3>
+      <ul id="saved-layer-presets-list-data" class="data-list"></ul>
+    </div>
+
+    <div class="data-section">
+      <h3>Downloaded map areas</h3>
+      <p id="tile-cache-stats" class="hint"></p>
+      <ul id="saved-map-regions-list" class="data-list"></ul>
+      <button id="btn-delete-all-maps" class="btn-danger full-width">Delete all downloaded map data</button>
+    </div>
+  </div>
+</div>
+
+<!-- Route details sheet - opened via "More" on a route's map popup -->
+<div id="sheet-route-details" class="sheet hidden">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><h2 id="route-details-name">Route</h2><button class="icon-btn sheet-close" data-target="sheet-route-details" data-icon="close"></button></div>
+  <div class="sheet-body">
+    <p class="hint" id="route-details-total"></p>
+    <div class="button-row">
+      <button id="btn-route-details-rename" class="btn-secondary">Rename</button>
+      <button id="btn-route-details-delete" class="btn-danger">Delete</button>
+    </div>
+    <button id="btn-route-details-navigate" class="btn-primary full-width">Start navigation</button>
+    <h3 id="route-details-segments-title">Segments</h3>
+    <ul id="route-details-segments" class="data-list"></ul>
+  </div>
+</div>
+
+<!-- Settings sheet -->
+<div id="sheet-settings" class="sheet hidden">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><h2>Settings</h2><button class="icon-btn sheet-close" data-target="sheet-settings" data-icon="close"></button></div>
+  <div class="sheet-body">
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-title">Liquid glass theme</div>
+        <div class="hint">Panels, menus, and popups become translucent so the map stays visible behind them. Turn off for the solid Classic look, which is easier to read in bright sun and slightly lighter on the battery.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-glass-theme" />
+        <span class="switch-track"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-title">Metric units</div>
+        <div class="hint">Routes, tracks, and distances throughout the app show in km/m instead of mi/ft. The scale bar always shows both regardless of this setting.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-metric-units" />
+        <span class="switch-track"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-title">Left-hand mode</div>
+        <div class="hint">Moves the menu and the flag/route controls to the left, and the legends, scale bar and navigation bar to the right.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-left-handed" />
+        <span class="switch-track"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-title">Show compass</div>
+        <div class="hint">Heading ribbon below the search bar, driven by the device's compass sensor. Tap it to calibrate which direction the app calls north.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-show-compass" checked />
+        <span class="switch-track"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-title">Hide scale bar</div>
+        <div class="hint">The route tool already measures distance precisely, so this is optional - on by default as a quick visual reference.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-hide-scale-bar" />
+        <span class="switch-track"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-title">Record button always on screen</div>
+        <div class="hint">Keeps the track recording button visible even when the menu is closed, so you can start and stop without opening anything. It stays visible while recording regardless of this setting.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-persistent-record" />
+        <span class="switch-track"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-title">Debug mode</div>
+        <div class="hint">Shows a log of what the app is doing - useful for troubleshooting, off by default.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-debug-mode" />
+        <span class="switch-track"></span>
+      </label>
+    </div>
+
+    <div class="data-section">
+      <h3>Storage</h3>
+      <p class="hint" id="storage-status-text">Checking storage status…</p>
+      <button id="btn-setup-storage" class="btn-primary full-width">Set up storage</button>
+      <div id="storage-backup-actions" class="hidden" style="margin-top:12px;">
+        <div class="button-row">
+          <button id="btn-export-backup" class="btn-secondary">Export backup</button>
+          <button id="btn-import-backup" class="btn-secondary">Import backup</button>
+        </div>
+        <ul id="backup-files-list" class="data-list"></ul>
+      </div>
+    </div>
+
+    <div class="data-section">
+      <h3>Map tile cache</h3>
+      <p class="hint" id="browse-cache-stats">Checking...</p>
+      <p class="hint">Panning the map caches tiles as you go, separately from the areas you download deliberately. Clearing these frees space without touching your downloaded regions.</p>
+      <button id="btn-clear-browse-cache" class="btn-secondary full-width">Clear browsing cache</button>
+    </div>
+
+    <div class="data-section">
+      <h3>Delete all data</h3>
+      <p class="hint">Removes everything Datum has stored on this device. Uninstalling the app does not do this on its own, because the storage folder lives outside the app.</p>
+      <button id="btn-delete-everything" class="btn-danger full-width">Delete all Datum data</button>
+    </div>
+
+    <div class="data-section">
+      <h3>About Datum</h3>
+      <p class="hint">A fully offline topo, satellite, and trail map. Free, open source under the MIT licence, with no account, no ads, and nothing sent anywhere.</p>
+      <p class="hint">Built by <a href="https://github.com/0x44616D69616E" target="_blank" rel="noopener noreferrer">0x44616D69616E</a> &middot; <a href="https://github.com/0x44616D69616E/Datum" target="_blank" rel="noopener noreferrer">Source on GitHub</a></p>
+      <p class="hint">Map data: USGS The National Map, OpenTopoMap (CC-BY-SA), Esri, Maxar, Earthstar Geographics, Waymarked Trails, OpenStreetMap contributors, BLM Surface Management Agency, RainViewer, US Census Bureau, Natural Earth.</p>
+      <button id="btn-support" class="btn-support full-width"><span class="btn-support-icon" data-icon="heart"></span><span class="btn-support-label">Tip the developer</span><span class="btn-support-icon" data-icon="heart"></span></button>
+      <p class="hint">Datum is free and always will be, with no ads and no account. A tip is never expected. Bug reports and feature requests through GitHub Issues are worth just as much.</p>
+    </div>
+  </div>
+</div>
+
+<!-- First-launch onboarding dialogs -->
+<div id="dialog-onboarding-offline" class="dialog dialog-centered hidden">
+  <h2>Before you head out</h2>
+  <p class="hint" style="font-size:14.5px; color: var(--text);">Datum only works offline for areas you've downloaded ahead of time. Satellite, topo, and trail imagery for a region needs to be downloaded first - from the download icon in the menu - while you still have signal.</p>
+  <div class="dialog-actions">
+    <button id="btn-onboarding-offline-ok" class="btn-primary full-width">Got it</button>
+  </div>
+</div>
+
+<div id="dialog-onboarding-storage" class="dialog dialog-centered hidden">
+  <h2>Choose a storage folder?</h2>
+  <p class="hint" style="font-size:14.5px; color: var(--text);">Datum saves your flags, routes and tracks as standard GPX files you can open in other apps, back up, or share. These go in <b>Documents/Datum</b> unless you pick somewhere else. You can change this any time in Settings.</p>
+  <div class="dialog-actions">
+    <button id="btn-onboarding-storage-later" class="btn-secondary">Use Documents</button>
+    <button id="btn-onboarding-storage-setup" class="btn-primary">Choose folder</button>
+  </div>
+</div>
+
+<div id="dialog-storage-folder" class="dialog dialog-centered hidden">
+  <h2>Choose a folder</h2>
+  <p class="hint" style="font-size:14.5px; color: var(--text);">Datum will create a "Datum" folder inside whichever one you pick.</p>
+  <div class="dialog-actions">
+    <button id="btn-folder-browse" class="btn-primary full-width">Browse for folder…</button>
+  </div>
+  <div class="dialog-actions">
+    <button id="btn-folder-documents" class="btn-secondary full-width">Documents</button>
+  </div>
+  <div class="dialog-actions">
+    <button id="btn-folder-downloads" class="btn-secondary full-width">Download folder</button>
+  </div>
+</div>
+
+<!-- Real folder browser - lists actual subfolders under external storage,
+     requires "All files access" (Android 11+ special permission, granted
+     via a system Settings screen since there's no normal runtime dialog
+     for it). Falls back to the Documents/Downloads dialog above if that
+     permission isn't granted or the plugin isn't available. -->
+<div id="sheet-import-browser" class="sheet hidden">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><h2>Import GPX</h2><button class="icon-btn sheet-close" data-target="sheet-import-browser" data-icon="close"></button></div>
+  <div class="sheet-body">
+    <p class="hint">Tap a GPX file to import it, or import every GPX in the folder you are looking at.</p>
+    <div class="path-bar" id="import-browser-path"></div>
+    <div class="button-row">
+      <button id="btn-import-browser-up" class="btn-secondary">Up one level</button>
+      <button id="btn-import-browser-folder" class="btn-primary">Import this folder</button>
+    </div>
+    <ul id="import-browser-list" class="data-list"></ul>
+  </div>
+</div>
+
+<div id="sheet-folder-browser" class="sheet hidden">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header"><h2 id="folder-browser-path">Storage</h2><button class="icon-btn sheet-close" data-target="sheet-folder-browser" data-icon="close"></button></div>
+  <div class="sheet-body">
+    <div class="button-row">
+      <button id="btn-folder-browser-up" class="btn-secondary">↑ Up a level</button>
+    </div>
+    <ul id="folder-browser-list" class="data-list"></ul>
+    <p class="hint">Data will be saved to:<br><strong id="folder-browser-destination" style="color: var(--text); font-size: 13.5px; word-break: break-all;"></strong></p>
+    <div class="button-row">
+      <button id="btn-folder-browser-select" class="btn-primary full-width">Select this folder</button>
+    </div>
+  </div>
+</div>
+
+<!-- Flag edit dialog -->
+<div id="dialog-waypoint" class="dialog hidden">
+  <h2>Edit flag</h2>
+  <label>Name <input type="text" id="wp-name" placeholder="Flag name" /></label>
+  <label>Notes <textarea id="wp-notes" rows="2"></textarea></label>
+  <label>Icon</label>
+  <div id="wp-icon-picker" class="icon-picker"></div>
+  <div id="wp-bind-section" class="hidden">
+    <p class="hint" id="wp-bind-status"></p>
+    <button id="btn-bind-flag" class="btn-secondary full-width hidden">Bind to route</button>
+    <button id="btn-unbind-flag" class="btn-secondary full-width hidden">Unbind from route</button>
+  </div>
+  <div class="dialog-actions">
+    <button id="btn-delete-waypoint" class="btn-danger">Delete</button>
+    <button id="btn-save-waypoint" class="btn-primary">Save</button>
+  </div>
+</div>
+
+<!-- Generic "pick one of these routes" list - only ever shown when a
+     flag sits within the tie threshold of two or more routes at once,
+     which should be rare; every other case auto-binds to the closest
+     without asking. -->
+<div id="dialog-route-choice" class="dialog dialog-centered hidden">
+  <h2>Which route?</h2>
+  <p class="hint">This flag is close to more than one route.</p>
+  <div id="route-choice-list"></div>
+  <div class="dialog-actions">
+    <button id="btn-route-choice-cancel" class="btn-secondary">Cancel</button>
+  </div>
+</div>
+
+<!-- Generic name-prompt dialog -->
+<div id="dialog-name-prompt" class="dialog hidden">
+  <h2 id="name-prompt-title">Name this</h2>
+  <input type="text" id="name-prompt-input" placeholder="Name" />
+  <div class="dialog-actions">
+    <button id="btn-name-prompt-cancel" class="btn-secondary">Cancel</button>
+    <button id="btn-name-prompt-confirm" class="btn-primary">Save</button>
+  </div>
+</div>
+
+<!-- Generic confirm dialog -->
+<div id="dialog-confirm" class="dialog hidden">
+  <h2 id="confirm-title">Are you sure?</h2>
+  <p id="confirm-message" class="hint"></p>
+  <div class="dialog-actions">
+    <button id="btn-confirm-no" class="btn-secondary">Cancel</button>
+    <button id="btn-confirm-yes" class="btn-danger">Yes</button>
+  </div>
+</div>
+
+<!-- Start-recording confirm dialog -->
+<!-- Stop-recording dialog. Three outcomes, and opening it does not interrupt
+     the recording: only Save and Delete end it. -->
+<div id="dialog-delete-everything" class="dialog hidden">
+  <h2>Delete all Datum data?</h2>
+  <p class="hint" id="delete-everything-summary"></p>
+  <label class="check-row">
+    <input type="checkbox" id="delete-keep-tiles" />
+    <span>Keep downloaded map tiles<br><small>Tick this to clear your waypoints, routes and tracks but keep the maps you have downloaded, which can be slow and expensive to fetch again.</small></span>
+  </label>
+  <label class="check-row">
+    <input type="checkbox" id="delete-keep-settings" />
+    <span>Keep settings<br><small>Units, theme, layer setup, saved layer presets, and your storage folder choice.</small></span>
+  </label>
+  <p class="hint" id="delete-everything-scope"></p>
+  <div class="dialog-actions dialog-actions-stacked">
+    <button id="btn-delete-everything-confirm" class="btn-danger full-width">Delete</button>
+    <button id="btn-delete-everything-cancel" class="btn-secondary full-width">Cancel</button>
+  </div>
+</div>
+
+<div id="dialog-import-destination" class="dialog hidden">
+  <h2>Where should this go?</h2>
+  <p class="hint" id="import-destination-summary"></p>
+  <div class="dialog-actions dialog-actions-stacked">
+    <button id="btn-import-dest-current" class="btn-primary full-width">Add to current session</button>
+    <button id="btn-import-dest-new" class="btn-secondary full-width">Load as a new session</button>
+    <button id="btn-import-dest-cancel" class="btn-secondary full-width">Cancel</button>
+  </div>
+</div>
+
+<div id="dialog-stop-record" class="dialog hidden">
+  <h2>Stop recording?</h2>
+  <p class="hint" id="stop-record-summary"></p>
+  <p class="hint">Still recording. Nothing changes unless you choose Save or Delete.</p>
+  <div class="dialog-actions dialog-actions-stacked">
+    <button id="btn-stop-record-save" class="btn-primary full-width">Save track</button>
+    <button id="btn-stop-record-delete" class="btn-danger full-width">Delete track</button>
+    <button id="btn-stop-record-cancel" class="btn-secondary full-width">Keep recording</button>
+  </div>
+</div>
+
+<div id="dialog-start-record" class="dialog hidden">
+  <h2>Start recording a track?</h2>
+  <p class="hint">Your GPS path will be logged until you stop.</p>
+  <div class="dialog-actions">
+    <button id="btn-start-record-no" class="btn-secondary">Cancel</button>
+    <button id="btn-start-record-yes" class="btn-primary">Start</button>
+  </div>
+</div>
+
+<!-- Route planning status pill (replaces the old top banner) -->
+<!-- Flag mode status pill: pick which icon new flags use, undo/redo drops -->
+<div id="flag-status-pill" class="status-pill control-pill hidden" style="flex-direction: column-reverse; align-items: stretch;">
+  <div style="display:flex; align-items:center; gap:8px;">
+    <span data-icon="flag" class="pill-icon"></span>
+    <button id="btn-undo-flag" class="icon-btn tiny pill-icon-btn" data-icon="undo" title="Undo last flag"></button>
+    <button id="btn-redo-flag" class="icon-btn tiny pill-icon-btn" data-icon="redo" title="Redo"></button>
+    <button id="btn-flag-icon-toggle" class="pill-btn pill-btn-ghost">Icon: Flag</button>
+  </div>
+  <div id="flag-type-picker" class="icon-picker hidden" style="margin-bottom:8px;"></div>
+</div>
+
+<div id="route-status-pill" class="status-pill control-pill hidden">
+  <span data-icon="route" class="pill-icon"></span>
+  <span id="route-distance">0.0 mi</span>
+  <button id="btn-undo-route" class="icon-btn tiny pill-icon-btn" data-icon="undo" title="Undo last point"></button>
+  <button id="btn-redo-route" class="icon-btn tiny pill-icon-btn" data-icon="redo" title="Redo"></button>
+  <button id="btn-finish-route" class="pill-btn">Finish</button>
+  <button id="btn-cancel-route" class="pill-btn pill-btn-ghost">Cancel</button>
+</div>
+
+<!-- Track recording status pill -->
+<div id="record-status-pill" class="status-pill hidden">
+  <span class="pill-icon recording-dot"></span>
+  <span id="record-stats">0.0 mi · 0:00</span>
+</div>
+
+<!-- Nearby-route picker - shown instead of the single-route Start bar when
+     more than one saved route passes within range. Selecting an entry
+     previews it on the map (solid line, panned into view) without
+     committing, so several can be compared before confirming. -->
+<div id="dialog-nav-route-picker" class="nav-picker hidden">
+  <h3 class="nav-picker-title">Routes near you</h3>
+  <p class="hint">Tap one to preview it, then start navigating.</p>
+  <ul id="nav-route-picker-list" class="data-list"></ul>
+  <div class="dialog-actions">
+    <button id="btn-nav-picker-cancel" class="btn-secondary">Cancel</button>
+    <button id="btn-nav-picker-confirm" class="btn-primary">Start</button>
+  </div>
+</div>
+
+<!-- Automatic "you're near a route" suggestion - no tap needed to discover
+     it, appears on its own via GPS proximity (see checkNavSuggestion in
+     app.js). Shares the nav HUD's position since the two are mutually
+     exclusive - this hides the instant navigation actually starts. -->
+<div id="nav-suggest" class="hidden">
+  <span id="nav-suggest-label">Start navigating</span>
+  <button id="btn-nav-suggest-start" class="pill-btn">Start</button>
+</div>
+
+<!-- Navigation HUD - bottom-anchored (not the top status-pill row above),
+     specifically so it can never collide with the recording pill: you can
+     record a track while navigating a route, and the two need to coexist
+     on screen at once without a layout fight. -->
+<div id="nav-hud" class="hidden">
+  <div class="nav-hud-row">
+    <div class="nav-hud-stat"><span id="nav-remaining">--</span><small>remaining</small></div>
+    <div class="nav-hud-stat" id="nav-next-waypoint-block"><span id="nav-next-waypoint">--</span><small>to next waypoint</small></div>
+    <button id="btn-nav-stop" class="pill-btn pill-btn-ghost">Stop</button>
+  </div>
+  <p class="hint hidden" id="nav-off-route-warning"></p>
+</div>
+
+<!-- Map overlays: legends and radar playback controls live ON the map
+     itself (bottom-left), not buried in the Layers sheet, so they stay
+     visible whenever their layer is on regardless of which sheet is open.
+     Both sit in one stacking container so they never overlap each other,
+     and each has a collapsible header. -->
+<div id="map-overlays-stack">
+  <div id="map-overlay-radar" class="map-overlay hidden">
+    <div class="map-overlay-header" data-target="map-overlay-radar">
+      <span>Weather Radar</span>
+      <span class="chevron" data-icon="chevronDown"></span>
+    </div>
+    <div class="map-overlay-body">
+      <div class="radar-controls">
+        <button class="icon-btn tiny" id="btn-radar-prev" data-icon="chevronUp" style="transform:rotate(-90deg)"></button>
+        <button class="icon-btn tiny" id="btn-radar-play" data-icon="play"></button>
+        <button class="icon-btn tiny" id="btn-radar-next" data-icon="chevronUp" style="transform:rotate(90deg)"></button>
+        <span id="radar-frame-time" class="hint">Loading…</span>
+      </div>
+      <div class="legend" id="radar-legend"></div>
+    </div>
+  </div>
+
+  <div id="map-overlay-blm" class="map-overlay hidden collapsed">
+    <div class="map-overlay-header" data-target="map-overlay-blm">
+      <span>Public Land Ownership</span>
+      <span class="chevron" data-icon="chevronDown"></span>
+    </div>
+    <div class="map-overlay-body">
+      <div class="legend" id="blm-legend">Loading…</div>
+    </div>
+  </div>
+</div>
+
+<script src="lib/leaflet/leaflet.js"></script>
+<script src="lib/leaflet/leaflet-rotate.js"></script>
+<script type="module" src="js/app.js"></script>
+<!-- Floating rather than modal: the whole point of the sliders is watching the
+     preview on the map, so a centred dialog with a dimmed backdrop would cover
+     the thing being adjusted. Draggable so it can be moved off whichever part
+     of the route matters. -->
+<div id="panel-trim-route" class="float-panel hidden">
+  <div class="float-panel-head">
+    <span class="float-panel-title">Trim route</span>
+    <span class="float-panel-hint">drag to move</span>
+  </div>
+  <label class="slider-row compact">
+    <span class="slider-label">Start</span>
+    <input type="range" id="trim-route-start" min="0" max="100" step="1" value="0" />
+    <output id="trim-route-start-out" class="slider-out">0</output>
+  </label>
+  <label class="slider-row compact">
+    <span class="slider-label">End</span>
+    <input type="range" id="trim-route-end" min="0" max="100" step="1" value="0" />
+    <output id="trim-route-end-out" class="slider-out">0</output>
+  </label>
+  <p class="float-panel-summary" id="trim-route-summary"></p>
+  <p class="float-panel-warning" id="trim-route-warning"></p>
+  <div class="float-panel-actions">
+    <button id="btn-trim-route-cancel" class="pill-btn pill-btn-ghost">Cancel</button>
+    <button id="btn-trim-route-save" class="pill-btn pill-btn-accent">Save</button>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+</body>
+</html>

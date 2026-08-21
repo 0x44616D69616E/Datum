@@ -1,0 +1,1630 @@
+/* ===== Design tokens ===== */
+:root {
+  --bg: #0d1117;
+  --surface: #171d26;
+  --surface-raised: #1d2530;
+  --border: #2b3542;
+  --border-soft: #232b36;
+  --text: #e7ecf1;
+  --text-muted: #8a97a8;
+  --accent: #4c8bf5;
+  --accent-soft: rgba(76, 139, 245, 0.16);
+  --danger: #e6484f;
+  --danger-soft: rgba(230, 72, 79, 0.14);
+  --success: #3ecf8e;
+  --radius-lg: 20px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+  --shadow-elevated: 0 8px 30px rgba(0, 0, 0, 0.45);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-top: env(safe-area-inset-top, 0px);
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; height: 100%; overflow: hidden;
+  background: var(--bg); color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+#map { position: absolute; inset: 0; z-index: 0; background: var(--bg); }
+
+/* ===== Top bar ===== */
+#topbar {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 500;
+  padding: calc(10px + var(--safe-top)) 10px 10px;
+  display: flex; align-items: center; gap: 8px;
+  background: linear-gradient(180deg, rgba(13,17,23,0.92) 0%, rgba(13,17,23,0.65) 70%, transparent 100%);
+}
+#search-input {
+  flex: 1; height: 44px; padding: 0 14px; border-radius: 22px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  font-size: 14px; outline: none;
+}
+#search-input::placeholder { color: var(--text-muted); }
+
+.icon-btn {
+  width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; cursor: pointer;
+}
+.icon-btn svg { width: 19px; height: 19px; }
+
+/* The row directly under the search bar always holds the GPS chip, and
+   also the compass ribbon when that's enabled. --top-row-h is that row's
+   height, so the flag/route/record pills sit clear of it either way -
+   and reclaim the space when the compass is off rather than leaving a
+   gap. (The pills previously overlapped the GPS chip outright once their
+   icon grid expanded; anchoring them to this variable fixes that too.) */
+/* Global fallback: every other .hidden rule in this file is scoped to a
+   specific element (.popover.hidden, #nav-hud.hidden, etc.) rather than a
+   bare .hidden - which meant any element that used class="... hidden"
+   without someone remembering to also add a matching scoped rule never
+   actually hid at all, since nothing said what "hidden" meant for it.
+   That's exactly what happened to the flag bind/unbind buttons. This is
+   a low-specificity safety net so that class of bug can't recur - the
+   more specific rules below (like .dialog.hidden's extra opacity/
+   pointer-events) still win wherever they exist, since a single-class
+   selector loses to any compound one. */
+.hidden { display: none; }
+
+/* ===== Handedness =====
+   Every element anchored to a screen edge references these variables
+   instead of hardcoding left/right, so flipping the whole layout is one
+   class on <body> rather than a duplicate rule per element.
+   "controls" = things you tap (FAB stack, flag/route menus). "info" =
+   things you read (legends, scale bar, nav HUD). They always sit on
+   opposite sides so a thumb never covers what it's meant to be reading.
+   Default is right-handed: controls right, info left. */
+body {
+  --controls-left: auto;
+  --controls-right: 12px;
+  --controls-pill-left: auto;
+  --controls-pill-right: 74px; /* clears the 50px FAB column plus a gap */
+  --info-left: 12px;
+  --info-right: auto;
+  /* The map credits sit flush against the bottom edge, so nothing else
+     anchored down there may use an offset of 0. */
+  --bottom-band: calc(44px + var(--safe-bottom));
+}
+body.left-handed {
+  --controls-left: 12px;
+  --controls-right: auto;
+  --controls-pill-left: 74px;
+  --controls-pill-right: auto;
+  --info-left: auto;
+  --info-right: 12px;
+}
+
+body { --top-row-h: 38px; }
+body.compass-on { --top-row-h: 54px; }
+
+#status-chip {
+  position: absolute; top: calc(64px + var(--safe-top)); left: 10px; z-index: 490;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 999px; padding: 6px 12px; font-size: 12px; font-weight: 600;
+  color: var(--text-muted); box-shadow: var(--shadow-elevated);
+  display: flex; align-items: center; gap: 6px;
+}
+/* Vertically centre the 30px chip against the taller ribbon row. */
+body.compass-on #status-chip { top: calc(72px + var(--safe-top)); }
+
+.gps-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.gps-dot.hidden { display: none; }
+.gps-spinner { display: flex; align-items: center; justify-content: center; color: var(--text-muted); }
+.gps-spinner svg { width: 11px; height: 11px; animation: gpsSpin 1.1s linear infinite; }
+.gps-spinner.hidden { display: none; }
+@keyframes gpsSpin { to { transform: rotate(360deg); } }
+.gps-dot.good { background: var(--success); }
+.gps-dot.fair { background: #e3b341; }
+.gps-dot.poor { background: var(--danger); }
+
+/* ===== Popovers (GPS detail, compass calibration) - anchored just below
+   the top row, dismissed by tapping the trigger again or anywhere off
+   the panel. ===== */
+.popover {
+  position: absolute; top: calc(64px + var(--safe-top) + var(--top-row-h) + 6px);
+  z-index: 496; width: min(300px, calc(100vw - 20px));
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-elevated);
+  padding: 14px;
+}
+.popover.hidden { display: none; }
+#popover-gps { left: 10px; }
+#popover-compass { left: 50%; transform: translateX(-50%); }
+.popover-row {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+  font-size: 13px; padding: 5px 0; border-bottom: 1px solid var(--border-soft);
+}
+.popover-row:last-of-type { border-bottom: none; margin-bottom: 8px; }
+.popover-label { color: var(--text-muted); font-size: 12px; }
+.popover-warning { color: var(--danger); }
+.popover-warning.hidden { display: none; }
+
+/* While placing flags or laying down route points, every tap is meant for
+   the map. Route and track lines each carry a 22px-wide invisible hit
+   line (added so thin lines are tappable at all) - targeting only the
+   pane here didn't actually work, because Leaflet's own CSS explicitly
+   re-enables pointer-events on each interactive path via the
+   .leaflet-interactive class (that's the actual mechanism that makes a
+   thin line tappable at all in the first place). That class wins over an
+   ancestor's pointer-events: none regardless, since pointer-events
+   doesn't "block" through an explicit child override the way most CSS
+   properties inherit - so the fix has to target that same class
+   directly, not the pane. */
+body.map-tap-mode .leaflet-overlay-pane .leaflet-interactive { pointer-events: none !important; }
+
+#search-results {
+  position: absolute; top: calc(64px + var(--safe-top)); left: 10px; right: 10px; z-index: 495;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md);
+  overflow: hidden; max-height: 45vh; overflow-y: auto; box-shadow: var(--shadow-elevated);
+}
+#search-results.hidden { display: none; }
+
+/* ===== Compass ribbon =====
+   A sliding heading strip in the style of a real navigation compass:
+   minor ticks every 15 degrees, labelled major ticks every 45, cardinals
+   picked out bolder with N in red (the usual convention), a fixed centre
+   pointer marking the heading actually being faced, and a numeric
+   readout. The track slides underneath the pointer in JS.
+
+   The edge fade is masked on the scrolling window only, not the whole
+   card, so ticks dissolve into the edges instead of being chopped off
+   mid-stroke while the pointer/readout/warning stay crisp. ===== */
+#compass-ribbon {
+  position: absolute; top: calc(64px + var(--safe-top)); left: 50%;
+  transform: translateX(-50%);
+  /* narrowed so it always clears the GPS chip sitting to its left,
+     even on the smallest phones, while staying screen-centred */
+  width: min(320px, calc(100vw - 160px)); height: 46px; z-index: 480;
+  cursor: pointer;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-elevated);
+}
+#compass-ribbon.hidden { display: none; }
+
+#compass-ribbon-window {
+  position: absolute; left: 0; right: 0; top: 5px; height: 25px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 15%, #000 85%, transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 15%, #000 85%, transparent 100%);
+}
+#compass-ribbon-track { position: absolute; top: 0; left: 0; height: 100%; }
+
+.compass-tick {
+  position: absolute; bottom: 0; height: 6px; width: 1px; background: var(--border);
+}
+.compass-tick.major { height: 10px; width: 1.5px; background: var(--text-muted); }
+
+.compass-tick-label {
+  position: absolute; top: 0; left: 0; transform: translateX(-50%);
+  font-size: 9px; font-weight: 600; color: var(--text-muted);
+  letter-spacing: 0.5px; white-space: nowrap;
+}
+.compass-tick-label.cardinal { font-size: 11px; font-weight: 700; color: var(--text); }
+.compass-tick-label.north { color: var(--danger); }
+
+.compass-ribbon-pointer {
+  position: absolute; left: 50%; top: 3px; height: 27px; width: 1.5px;
+  transform: translateX(-50%); border-radius: 1px;
+  background: var(--accent); pointer-events: none;
+}
+.compass-ribbon-pointer::before {
+  content: ""; position: absolute; top: -1px; left: 50%; transform: translateX(-50%);
+  border-left: 5px solid transparent; border-right: 5px solid transparent;
+  border-top: 6px solid var(--accent);
+}
+
+#compass-heading-readout {
+  position: absolute; left: 0; right: 0; bottom: 3px; text-align: center;
+  font-size: 11px; font-weight: 700; color: var(--accent);
+  font-variant-numeric: tabular-nums; letter-spacing: 0.6px;
+}
+
+/* Only shown while the sensor itself reports low confidence - not a
+   permanent control, so it costs no space in the normal case. */
+#compass-calibrate-warn {
+  position: absolute; right: 5px; top: 5px;
+  color: var(--danger); pointer-events: none;
+  font-size: 10px; font-weight: 700;
+}
+
+/* ===== Navigation HUD - bottom bar, active while navigating a route.
+   Constrained on the right so it never runs under the FAB column. ===== */
+#nav-hud, #nav-suggest {
+  /* Bottom offset matches #map-overlays-stack, which already solves this
+     same problem: the attribution/credits control and the scale bar both
+     occupy the bottom band, and 20px put this straight on top of them.
+     Mirrors the legend stack's scale-bar-aware pair of offsets so the two
+     stay consistent if either is retuned later. */
+  position: absolute;
+  left: var(--info-left); right: var(--info-right);
+  width: min(300px, calc(100vw - 90px));
+  bottom: calc(75px + var(--safe-bottom)); z-index: 495;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-elevated); padding: 10px 14px;
+  transition: bottom 0.2s ease;
+}
+body.scale-bar-hidden #nav-hud,
+body.scale-bar-hidden #nav-suggest {
+  bottom: calc(50px + var(--safe-bottom));
+}
+#nav-hud.hidden, #nav-suggest.hidden { display: none; }
+
+/* The nearby-route picker deliberately is NOT a .dialog: it needs the map
+   fully visible and undimmed behind it, since its whole purpose is
+   comparing routes drawn on that map. So it gets no backdrop, sits low
+   rather than centred, and shares the nav HUD's placement and width. */
+.nav-picker {
+  position: absolute;
+  left: var(--info-left); right: var(--info-right);
+  width: min(320px, calc(100vw - 90px));
+  bottom: calc(75px + var(--safe-bottom)); z-index: 496;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-elevated);
+  padding: 12px 14px;
+}
+.nav-picker.hidden { display: none; }
+body.scale-bar-hidden .nav-picker { bottom: calc(50px + var(--safe-bottom)); }
+.nav-picker-title { margin: 0 0 2px; font-size: 14px; }
+.nav-picker .hint { margin: 0 0 4px; }
+#nav-suggest { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+#nav-suggest-label { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The dashed route line, while you're close enough to actually start
+   navigating it - flowing toward the destination end as a "this way"
+   cue, same trigger as the Start suggestion above. Direction assumes
+   dash-offset decreasing moves the pattern the same way the path itself
+   was drawn (start point -> destination); if it visually reads as
+   flowing the wrong way on-device, flip the keyframe's from/to values. */
+.route-line-flowing { animation: routeFlow 1s linear infinite; }
+@keyframes routeFlow { from { stroke-dashoffset: 12; } to { stroke-dashoffset: 0; } }
+
+/* The route currently selected in the nearby-route picker: keeps the
+   flowing dashes AND adds a pulsing glow, so it reads as the live
+   selection even against a busy basemap. Two animations on one element,
+   comma-separated - they run independently and don't need to share a
+   duration. drop-shadow (not box-shadow) because this is an SVG path,
+   where box-shadow has no effect. */
+.route-line-selected {
+  animation: routeFlow 1s linear infinite, routeGlow 1.6s ease-in-out infinite;
+}
+@keyframes routeGlow {
+  /* Orange - close to the route's own amber, but pushed brighter and
+     more saturated so the glow reads as "this line, lit up" rather than
+     a separate colour next to it. Kept high-luminance since a glow works
+     by ADDING light - a dark-valued colour barely registers against pale
+     topo tiles, which is where most basemaps sit. */
+  0%, 100% { filter: drop-shadow(0 0 3px rgba(249,115,22,0.85)); }
+  50%      { filter: drop-shadow(0 0 8px rgba(251,146,60,1)) drop-shadow(0 0 16px rgba(249,115,22,0.75)); }
+}
+.nav-hud-row { display: flex; align-items: center; gap: 14px; }
+.nav-hud-stat { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.nav-hud-stat span { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.nav-hud-stat small { font-size: 10px; color: var(--text-muted); }
+#nav-off-route-warning { color: var(--danger); margin: 6px 0 0; }
+#nav-off-route-warning.hidden { display: none; }
+
+/* Direction-to-next-waypoint marker on the compass ribbon - a single
+   element repositioned every tick (not repeated across laps like the
+   tick marks, since it tracks one specific live bearing, not a fixed
+   compass point). */
+#compass-nav-diamond {
+  position: absolute; bottom: 2px; width: 8px; height: 8px;
+  transform: translateX(-50%) rotate(45deg);
+  background: var(--accent); box-shadow: 0 0 6px 2px var(--accent);
+}
+#compass-nav-diamond.hidden { display: none; }
+.result-item {
+  padding: 12px 14px; font-size: 13px; border-bottom: 1px solid var(--border-soft); cursor: pointer;
+}
+.result-item:last-child { border-bottom: none; }
+.result-item:active { background: var(--surface-raised); }
+.result-type { display: block; font-size: 11px; color: var(--success); margin-top: 2px; }
+
+/* ===== Floating action buttons ===== */
+#fab-stack {
+  position: absolute;
+  left: var(--controls-left); right: var(--controls-right);
+  bottom: var(--bottom-band); z-index: 500;
+  display: flex; flex-direction: column; gap: 10px;
+  align-items: flex-end;
+}
+body.left-handed #fab-stack { align-items: flex-start; }
+.fab {
+  width: 50px; height: 50px; border-radius: 50%;
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: var(--shadow-elevated); cursor: pointer; padding: 0;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.fab svg { width: 22px; height: 22px; }
+.fab.active {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+  box-shadow: 0 0 0 4px var(--accent-soft), var(--shadow-elevated);
+}
+.fab.recording {
+  background: var(--danger); border-color: var(--danger); color: #fff;
+  animation: recordGlow 1.4s ease-in-out infinite;
+}
+@keyframes recordGlow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(230, 72, 79, 0.55), var(--shadow-elevated); }
+  50% { box-shadow: 0 0 0 10px rgba(230, 72, 79, 0), var(--shadow-elevated); }
+}
+
+.compass-fab {
+  display: flex; align-items: center; justify-content: center;
+}
+#compass-needle { display: block; transition: transform 0.05s linear; }
+
+.fab-menu-items {
+  display: flex; flex-direction: column; gap: 10px; align-items: flex-end;
+  animation: fabMenuIn 0.16s ease;
+}
+.fab-menu-items.hidden { display: none; }
+@keyframes fabMenuIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* .fab-menu-toggle uses the standard .fab.active highlight (defined above)
+   instead of rotating - stays straight, just highlighted, when expanded. */
+
+/* ===== Layer manager rows (reorderable, per-layer opacity) ===== */
+.layer-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; }
+.layer-row label { flex: 1; display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13.5px; }
+.layer-row input[type="range"] { width: 80px; accent-color: var(--accent); }
+.layer-reorder { display: flex; flex-direction: column; gap: 2px; }
+.icon-btn.tiny {
+  width: 24px; height: 24px; border: none; background: none; color: var(--text-muted); padding: 0;
+}
+.icon-btn.tiny svg { width: 14px; height: 14px; }
+.icon-btn.tiny.disabled { opacity: 0.25; pointer-events: none; }
+.drag-handle {
+  touch-action: none; /* critical: without this, touch-move is interpreted as
+    scrolling the sheet instead of reaching our pointermove handler at all */
+  cursor: grab;
+}
+.layer-row.dragging {
+  touch-action: none;
+  position: relative; z-index: 10;
+  background: var(--surface-raised);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  border-radius: var(--radius-sm);
+}
+
+.legend { display: flex; flex-direction: column; gap: 4px; transition: opacity 0.1s linear; }
+.legend-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); }
+.legend-row img { border-radius: 2px; flex-shrink: 0; }
+.legend-swatch {
+  width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; display: inline-block;
+}
+
+/* Overlaid dual scale bar instead of two stacked rows: both units share
+   one visual baseline down the middle of a fixed-height container, with
+   Leaflet's own metric-then-imperial DOM order (confirmed in leaflet.js's
+   _addScales) used to tell them apart via :first-child/:last-child - no
+   extra markup needed since Leaflet always builds it in that order.
+   Metric (first) sits in the top half, its box's bottom border landing
+   exactly on the shared middle line so its ticks point up and its label
+   sits above. Imperial (last) mirrors that in the bottom half: its box's
+   top border lands on that same middle line, ticks pointing down, label
+   below. Same minimal line-only look as before (no fill, halo shadow for
+   legibility over any basemap), just two of them overlaid instead of
+   stacked as separate rows. */
+.leaflet-control-scale-line {
+  position: absolute;
+  left: 0;
+  background: transparent !important;
+  color: #1c2128 !important;
+  font-size: 11px !important;
+  font-weight: 600;
+  white-space: nowrap;
+  box-sizing: border-box;
+  filter: drop-shadow(0 0 2px rgba(255,255,255,0.85)) drop-shadow(0 0 2px rgba(255,255,255,0.85));
+}
+.leaflet-control-scale-line:first-child {
+  /* metric - ticks/label above the shared middle line. Anchored via top
+     (not bottom) specifically so both halves share the same positioning
+     basis - mixing top- and bottom-anchored positioning on a shared
+     border line is what was causing a 1px sub-pixel rounding mismatch
+     between the two, instead of them landing on the exact same line. */
+  top: 0;
+  height: 17px;
+  border: none !important;
+  border-bottom: 1.5px solid #1c2128 !important;
+  border-left: 1.5px solid #1c2128 !important;
+  border-right: 1.5px solid #1c2128 !important;
+  padding: 0 4px 2px !important;
+}
+.leaflet-control-scale-line:last-child {
+  /* imperial - ticks/label below the shared middle line */
+  top: 17px;
+  height: 17px;
+  border: none !important;
+  border-top: 1.5px solid #1c2128 !important;
+  border-left: 1.5px solid #1c2128 !important;
+  border-right: 1.5px solid #1c2128 !important;
+  padding: 2px 4px 0 !important;
+}
+
+/* Leaflet's own default sits the scale bar only 5px from the very bottom
+   edge, the same vertical band the attribution/credits control occupies
+   on the opposite corner - on a narrow phone screen that credits text
+   (long, since it lists every map data source) is wide enough to visually
+   run under/over the scale bar. Lifting it clear of that band, and making
+   it safe-area-aware like every other floating element in this app (the
+   default Leaflet margin isn't). */
+.leaflet-control-scale {
+  position: relative;
+  height: 34px;
+  margin-bottom: calc(30px + var(--safe-bottom)) !important;
+}
+/* In left-hand mode the scale control moves to the bottom-RIGHT corner,
+   where Leaflet right-aligns its container. The scale lines are
+   absolutely positioned, so they're out of flow and the container
+   collapses to zero width - meaning `left: 0` started them at the screen
+   edge and ran them straight off it. Anchoring to the right instead
+   makes them extend inward, which is the only direction there's room. */
+body.left-handed .leaflet-control-scale-line { left: auto; right: 0; }
+body.left-handed .leaflet-control-scale { margin-right: 12px !important; margin-left: 0 !important; }
+
+/* ===== Retheme Leaflet's default popup - used for the route/track map
+   bubbles - to match the app's dark surface. Untouched, this is stock
+   Leaflet: white box, black text, generic grey close X. ===== */
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-elevated);
+}
+.leaflet-popup-content-wrapper {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.leaflet-popup-content {
+  font-size: 13px;
+  line-height: 1.5;
+}
+.leaflet-container a.leaflet-popup-close-button {
+  color: var(--text-muted);
+}
+.leaflet-container a.leaflet-popup-close-button:hover,
+.leaflet-container a.leaflet-popup-close-button:focus {
+  color: var(--text);
+}
+
+/* Leaflet applies a fade-in CSS transition to tiles by default (meant for
+   normal one-time loading). During radar playback, opacity is toggled
+   programmatically between many already-loaded frame layers every 300ms -
+   that transition easing fights with the rapid toggling and is the likely
+   cause of some frames appearing to "ghost" (caught mid-fade) while others
+   look correctly fully opaque. Disabling it makes every opacity change
+   instant, which is what playback actually needs. */
+.radar-frame-tile,
+.leaflet-tile-pane .radar-frame-tile img {
+  transition: none !important;
+}
+
+/* ===== Floating map overlays (legends, radar controls) - live on the map
+   itself, bottom-left, stacked in one container so multiple never overlap,
+   each individually collapsible ===== */
+#map-overlays-stack {
+  /* bottom offset raised in step with .leaflet-control-scale below, so
+     legends/radar controls keep clearing the scale bar's position with
+     the same margin as before, rather than starting to overlap it */
+  position: absolute;
+  left: var(--info-left); right: var(--info-right);
+  bottom: calc(75px + var(--safe-bottom)); z-index: 470;
+  display: flex; flex-direction: column-reverse; gap: 8px; /* column-reverse: first-added stays closest to its natural bottom slot */
+  max-width: 210px;
+  transition: bottom 0.2s ease;
+}
+/* When the scale bar is hidden (Settings), drop the whole stack down to
+   reclaim the space that was reserved to clear it, instead of leaving
+   that gap sitting empty under the legends. */
+#map-overlays-stack.scale-bar-hidden {
+  bottom: calc(50px + var(--safe-bottom));
+}
+/* The nav HUD and the legends share the info side's bottom corner, so
+   the legends have to stack above the HUD while it's up rather than
+   sitting underneath it. ~66px covers the HUD's own height plus a gap. */
+body.nav-hud-active #map-overlays-stack { bottom: calc(141px + var(--safe-bottom)); }
+body.nav-hud-active #map-overlays-stack.scale-bar-hidden { bottom: calc(116px + var(--safe-bottom)); }
+.map-overlay {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-elevated); overflow: hidden;
+  width: 210px; /* fixed, not shrink-to-fit - otherwise the panel visibly
+    resized every time the radar clock text changed length (e.g. "12:45 PM"
+    vs "1:05 PM" have different digit counts) */
+  /* column-reverse renders the body ABOVE the header despite the header
+     coming first in the DOM. Combined with the stack being anchored to
+     the bottom of the screen, that means expanding a legend grows it
+     upward while the header itself stays exactly where it was - rather
+     than the whole panel (title included) jumping up the screen as the
+     body appears, which made the toggle feel like it moved away from
+     the finger that just tapped it. */
+  display: flex;
+  flex-direction: column-reverse;
+}
+.map-overlay.hidden { display: none; }
+.map-overlay-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 12px; cursor: pointer; font-size: 12.5px; font-weight: 600;
+}
+.map-overlay-header .chevron { width: 14px; height: 14px; color: var(--text-muted); transition: transform 0.15s ease; }
+.map-overlay-header .chevron svg { width: 14px; height: 14px; }
+/* Collapsed points UP (tap to open, which now opens upward); expanded
+   is the default chevronDown pointing down (tap to close). Previously
+   collapsed pointed sideways, which no longer matches the direction the
+   panel actually moves. */
+.map-overlay.collapsed .map-overlay-header .chevron { transform: rotate(180deg); }
+.map-overlay-body { padding: 10px 12px 0; } /* flipped: the body now renders above the header */
+.map-overlay.collapsed .map-overlay-body { display: none; }
+.map-overlay .radar-controls { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.map-overlay .radar-controls .icon-btn { flex-shrink: 0; background: var(--surface-raised); border: 1px solid var(--border); }
+.map-overlay #radar-frame-time {
+  margin: 0; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px;
+  flex: 1; min-width: 0; /* the min-width:0 is the actual fix - flex items
+    default to min-width:auto, which lets them grow past their flex basis
+    to fit their content's natural width regardless of the parent's fixed
+    width, which is what let "12:45 PM" vs "1:05 PM" visibly resize the
+    panel despite it having a fixed width set */
+}
+
+.radar-gradient-bar {
+  height: 12px; border-radius: 4px; margin-bottom: 4px;
+  border: 1px solid rgba(255,255,255,0.15);
+}
+.radar-gradient-labels {
+  display: flex; justify-content: space-between; font-size: 10.5px; color: var(--text-muted);
+}
+
+/* ===== Shared backdrop ===== */
+#backdrop {
+  position: absolute; inset: 0; z-index: 600;
+  background: rgba(0, 0, 0, 0.55);
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+#backdrop.visible { opacity: 1; pointer-events: auto; }
+#backdrop.hidden { display: none; }
+
+/* ===== Bottom sheets ===== */
+.sheet {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 650;
+  max-height: 78vh; display: flex; flex-direction: column;
+  background: var(--surface); border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  box-shadow: var(--shadow-elevated);
+  transform: translateY(100%);
+  transition: transform 0.22s cubic-bezier(0.32, 0.72, 0, 1);
+  padding-bottom: var(--safe-bottom);
+}
+/* display:none is why the slide animation never played: an element that is
+   not rendered cannot transition, so the sheet simply appeared and vanished
+   despite the transform transition defined above. visibility keeps it in the
+   layout long enough to animate, and the 0s delay on the way out is timed to
+   the transform so it disappears only once it has finished sliding. */
+.sheet.hidden {
+  transform: translateY(100%);
+  visibility: hidden; pointer-events: none;
+  transition: transform 0.22s cubic-bezier(0.32, 0.72, 0, 1), visibility 0s 0.22s;
+}
+.sheet:not(.hidden) {
+  transform: translateY(0);
+  visibility: visible; pointer-events: auto;
+  transition: transform 0.22s cubic-bezier(0.32, 0.72, 0, 1), visibility 0s;
+}
+/* Suppressed while a finger is on the handle: a transition here would fight
+   the drag and make the sheet lag behind the gesture. */
+.sheet.is-dragging { transition: none; }
+
+.sheet-handle {
+  width: 36px; height: 4px; border-radius: 3px; background: var(--border);
+  margin: 10px auto 4px;
+  /* The handle is the grab target, so it gets a larger hit area than its
+     visual size and stops the drag being read as a page scroll. */
+  position: relative; touch-action: none; cursor: grab;
+}
+.sheet-handle::after {
+  content: ""; position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 120px; height: 34px;
+}
+.sheet-handle:active { cursor: grabbing; }
+body.theme-glass .sheet-handle {
+  background: rgba(255, 255, 255, 0.65);
+  box-shadow:
+    1px 0 0 rgba(0, 0, 0, 0.7), -1px 0 0 rgba(0, 0, 0, 0.7),
+    0 1px 0 rgba(0, 0, 0, 0.7), 0 -1px 0 rgba(0, 0, 0, 0.7);
+}
+.sheet-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 18px 12px; border-bottom: 1px solid var(--border-soft);
+}
+.sheet-header h2 { font-size: 17px; margin: 0; font-weight: 600; }
+.sheet-body { padding: 16px 18px 20px; overflow-y: auto; }
+
+/* ===== Centered dialogs (prompts/confirms - short, focused) ===== */
+.dialog {
+  position: absolute; left: 20px; right: 20px; top: 50%; z-index: 700;
+  transform: translateY(-50%) scale(0.96);
+  background: var(--surface); border-radius: var(--radius-lg);
+  padding: 22px 20px; box-shadow: var(--shadow-elevated);
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+.dialog.hidden { display: none; opacity: 0; pointer-events: none; }
+.dialog:not(.hidden) { opacity: 1; pointer-events: auto; transform: translateY(-50%) scale(1); }
+.dialog h2 { font-size: 17px; margin: 0 0 12px; font-weight: 600; }
+.dialog input[type="text"], .dialog textarea {
+  width: 100%; padding: 11px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  font-size: 14px; margin-bottom: 6px; outline: none;
+}
+.dialog label { display: block; font-size: 13px; color: var(--text-muted); margin: 12px 0 4px; }
+.dialog-actions { display: flex; gap: 10px; margin-top: 18px; }
+.dialog-actions button { flex: 1; }
+.dialog-centered { text-align: center; }
+.dialog-centered h2, .dialog-centered p { text-align: center; }
+
+/* ===== Form elements shared by sheets & dialogs ===== */
+label { font-size: 13px; }
+input[type="text"], input[type="number"], textarea {
+  font-family: inherit;
+}
+.layer-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; }
+.layer-row label { flex: 1; display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; }
+.layer-row input[type="range"] { width: 90px; accent-color: var(--accent); }
+input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
+
+.search-row { display: flex; gap: 8px; margin: 10px 0; }
+.search-row input[type="text"] {
+  flex: 1; padding: 11px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px;
+}
+
+.hint { font-size: 12.5px; color: var(--text-muted); line-height: 1.4; margin: 8px 0; }
+
+.button-row { display: flex; gap: 10px; margin: 12px 0; }
+/* Three destructive-adjacent choices side by side would be cramped and easy to
+   mis-tap, so they stack full width with the safe option last, where a thumb
+   naturally rests. */
+.dialog-actions-stacked { flex-direction: column; align-items: stretch; gap: 8px; }
+/* Checkbox plus wrapped explanatory text. align-items: flex-start keeps the
+   box aligned to the first line rather than centred against a tall block. */
+.check-row { display: flex; align-items: flex-start; gap: 10px; margin: 10px 0; }
+.check-row input { margin-top: 3px; flex: 0 0 auto; }
+.check-row small { color: var(--text-muted); }
+.btn-primary, .btn-secondary, .btn-danger {
+  padding: 12px 16px; border-radius: var(--radius-sm); border: none;
+  font-size: 14px; font-weight: 600; cursor: pointer; flex: 1;
+}
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-secondary { background: var(--surface-raised); color: var(--text); border: 1px solid var(--border); }
+.btn-danger { background: var(--danger-soft); color: var(--danger); border: 1px solid rgba(230,72,79,0.35); }
+.full-width { width: 100%; }
+
+.layer-checks { display: flex; gap: 16px; margin: 12px 0; font-size: 13px; }
+.layer-checks label { display: flex; align-items: center; gap: 6px; }
+
+#estimate-readout { margin: 8px 0; }
+.progress-bar { background: var(--border-soft); border-radius: 6px; height: 8px; overflow: hidden; margin-top: 6px; }
+#progress-fill { background: var(--accent); height: 100%; width: 0%; transition: width 0.15s ease; }
+#download-progress.hidden { display: none; }
+#download-progress { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+#download-progress .progress-bar { flex: 1; }
+#progress-text { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+
+.selected-label { margin: 4px 0 10px; font-size: 14px; }
+
+/* ===== Data lists (sessions, routes, regions) ===== */
+.data-section { border-top: 1px solid var(--border-soft); padding-top: 16px; margin-top: 16px; }
+.data-section:first-child { border-top: none; margin-top: 0; padding-top: 0; }
+.data-section h3 { font-size: 14px; margin: 0 0 6px; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
+#current-session-label { color: var(--text); text-transform: none; }
+
+.data-list { list-style: none; padding: 0; margin: 8px 0; font-size: 13.5px; }
+.data-list li {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  padding: 10px 0; border-bottom: 1px solid var(--border-soft);
+}
+.data-list li:last-child { border-bottom: none; }
+.data-list li small { color: var(--text-muted); font-size: 11.5px; }
+/* Selected row in the nearby-route picker - marks which route is
+   currently previewed (animated dashes) on the map behind the dialog. */
+.data-list li.selected {
+  background: var(--accent-soft);
+  border-radius: var(--radius-sm);
+  padding-left: 8px; padding-right: 8px;
+}
+/* Scrolls rather than growing without bound. There was never a cap on how
+   many nearby routes the picker lists, but without this the list simply
+   grew until it pushed Cancel/Start off the bottom of the screen, which
+   was a limit in practice. Capped against viewport height so it adapts to
+   the device rather than assuming a row count. */
+#nav-route-picker-list {
+  max-height: min(50vh, 320px);
+  overflow-y: auto;
+  overscroll-behavior: contain; /* don't let an over-scroll bubble out and pan the map behind */
+}
+.item-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.item-actions button {
+  padding: 6px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+  background: var(--surface-raised); color: var(--text); font-size: 12px;
+}
+.item-actions button.danger { border-color: rgba(230,72,79,0.4); color: var(--danger); background: var(--danger-soft); }
+
+/* ===== Settings toggle switch ===== */
+.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 6px 0; }
+.toggle-title { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+.switch { position: relative; width: 46px; height: 26px; flex-shrink: 0; display: inline-block; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch-track {
+  position: absolute; inset: 0; background: var(--border); border-radius: 999px;
+  transition: background 0.15s ease; cursor: pointer;
+}
+.switch-track::before {
+  content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px;
+  background: #fff; border-radius: 50%; transition: transform 0.15s ease;
+}
+.switch input:checked + .switch-track { background: var(--accent); }
+.switch input:checked + .switch-track::before { transform: translateX(20px); }
+
+/* ===== Status pills (route planning / recording - replace old top/bottom banners) ===== */
+.status-pill {
+  position: absolute; left: 50%; top: calc(64px + var(--safe-top) + var(--top-row-h)); z-index: 480;
+  transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px;
+  max-width: calc(100vw - 24px);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
+  padding: 8px 10px 8px 14px; box-shadow: var(--shadow-elevated); font-size: 13px;
+  white-space: nowrap;
+}
+.status-pill.hidden { display: none; }
+
+/* The flag and route menus are things you actively operate while the
+   other hand holds nothing, so they sit right next to the FAB column
+   instead of at the top of the screen - reachable with the same thumb,
+   and out of the way of the map you're tapping. The record pill keeps
+   the original top-centre spot: it's a passive indicator, not a control.
+   Anchored by the BOTTOM so any popout (the flag icon grid) grows
+   upward, away from the thumb rather than under it. */
+.control-pill {
+  top: auto; transform: none;
+  left: var(--controls-pill-left); right: var(--controls-pill-right);
+  bottom: var(--bottom-band);
+  max-width: calc(100vw - 100px);
+}
+
+#flag-status-pill {
+  border-radius: var(--radius-md); /* rounded rectangle, not the 999px pill shape -
+    that only works for a single compact row, and produced a lopsided
+    oval/blob once the icon grid expanded underneath it */
+  max-width: 300px;
+  padding: 10px 12px;
+}
+#flag-status-pill .icon-picker {
+  justify-content: center;
+}
+
+.pill-icon { width: 16px; height: 16px; display: flex; align-items: center; color: var(--accent); }
+.pill-icon svg { width: 16px; height: 16px; }
+.pill-icon-btn {
+  width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+  background: var(--surface-raised); border: 1px solid var(--border); color: var(--text);
+}
+.pill-icon-btn svg { width: 14px; height: 14px; }
+.pill-icon-btn.disabled { opacity: 0.3; pointer-events: none; }
+
+.icon-picker { display: flex; flex-wrap: wrap; gap: 8px; }
+.icon-picker.hidden { display: none; }
+.icon-picker-btn {
+  width: 40px; height: 40px; border-radius: var(--radius-sm);
+  background: var(--surface-raised); border: 1px solid var(--border); color: var(--text);
+  display: flex; align-items: center; justify-content: center; padding: 0;
+}
+.icon-picker-btn svg { width: 20px; height: 20px; }
+.icon-picker-btn.selected { border-color: var(--accent); background: var(--accent-soft); }
+.recording-dot {
+  width: 10px; height: 10px; border-radius: 50%; background: var(--danger);
+  animation: recordGlow 1.4s ease-in-out infinite;
+}
+.pill-btn {
+  border: none; background: var(--accent); color: #fff; font-weight: 600;
+  padding: 6px 12px; border-radius: 999px; font-size: 12.5px;
+}
+.pill-btn-ghost { background: var(--surface-raised); color: var(--text-muted); border: 1px solid var(--border); }
+/* Small danger variant for popup actions. .btn-danger is the large form used
+   in sheets and dialogs, so it can't be reused at pill size. */
+.pill-btn-danger { background: var(--danger-soft); color: var(--danger); border: 1px solid rgba(230,72,79,0.35); }
+
+/* ===== Debug overlay (created dynamically in JS; styled here for consistency) ===== */
+#debug-overlay { font-family: "SF Mono", "Roboto Mono", monospace; }
+
+/* Transient notice for things that happen without the user asking, such as a
+   flag auto-binding to a nearby route. Sits above the map and every sheet, but
+   is not interactive and never blocks a tap, since it appears unprompted and
+   must not interrupt whatever the user was doing. aria-live announces it to a
+   screen reader without moving focus. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 92px;
+  transform: translateX(-50%) translateY(8px);
+  max-width: min(90vw, 420px);
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.35;
+  text-align: center;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+  z-index: 900;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+.toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* Session tree in the Data sheet. Indentation is the only depth cue, so it is
+   generous enough to read at a glance on a phone. */
+.tree { list-style: none; margin: 8px 0 0; padding: 0; }
+.tree-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 6px; border-bottom: 1px solid var(--border);
+  min-height: 44px; /* comfortable touch target */
+}
+.tree-row.depth-1 { padding-left: 22px; }
+.tree-row.depth-2 { padding-left: 44px; }
+.tree-twisty {
+  flex: 0 0 auto; width: 26px; text-align: center;
+  color: var(--text); font-size: 17px; line-height: 1; user-select: none;
+}
+.tree-twisty.leaf { visibility: hidden; }
+.tree-label { flex: 1 1 auto; min-width: 0; }
+.tree-label .tree-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-label small { color: var(--text-muted); }
+.tree-count { flex: 0 0 auto; color: var(--text-muted); font-size: 12px; }
+.tree-check { flex: 0 0 auto; width: 20px; height: 20px; margin: 0; }
+.tree-empty { color: var(--text-muted); font-size: 13px; padding: 10px 6px; }
+/* The session currently loaded, so the tree shows which one edits belong to. */
+.tree-row.is-active .tree-name { color: var(--accent); font-weight: 600; }
+/* Row action, sized to match the small list buttons rather than the large
+   sheet buttons. Without an explicit rule this renders as an unstyled default
+   button, which is exactly the defect item 5.5 was about. */
+.tree-action {
+  flex: 0 0 auto;
+  padding: 6px 10px; font-size: 12px;
+  border-radius: 8px;
+  background: var(--surface-raised); color: var(--text);
+  border: 1px solid var(--border);
+}
+
+/* Trim controls. The disabled state is greyed rather than hidden so the
+   options stay visible and the checkbox reads as enabling something specific
+   rather than revealing an unknown. */
+.trim-controls { margin: 4px 0 12px; transition: opacity 150ms ease; }
+.trim-controls.is-disabled { opacity: 0.4; pointer-events: none; }
+.slider-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.slider-label { flex: 0 0 96px; font-size: 13px; color: var(--text-muted); }
+.slider-row input[type="range"] { flex: 1 1 auto; min-width: 0; accent-color: var(--accent); }
+.slider-out { flex: 0 0 64px; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; }
+
+/* Folder / file glyph, between the twisty and the label. currentColor picks up
+   the muted text colour so it reads as structure rather than as an action. */
+.tree-icon {
+  flex: 0 0 auto; width: 18px; height: 18px;
+  color: var(--text-muted); display: inline-flex; align-items: center;
+}
+.tree-icon svg { width: 18px; height: 18px; }
+.tree-row.is-active .tree-icon { color: var(--accent); }
+
+/* Floating, draggable, semi-transparent control panel. Sits above the map but
+   is not modal and has no backdrop, because it exists to be used while
+   watching the map underneath it. */
+.float-panel {
+  position: fixed;
+  z-index: 800;
+  width: min(74vw, 290px);
+  padding: 8px 10px 10px;
+  border-radius: 12px;
+  /* Hardcoded values replaced by tokens so the panel follows whichever theme
+     is active, rather than being a third appearance of its own. The Classic
+     values are the tokens' Classic values; Glass makes it properly glassy. */
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-elevated);
+  color: var(--text);
+  /* Stops a drag from panning the map underneath. Range inputs opt back in
+     below, or they would stop responding to touch entirely. */
+  touch-action: none;
+  user-select: none;
+}
+body:not(.theme-glass) .float-panel {
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+.float-panel input[type="range"] { touch-action: auto; }
+
+.float-panel-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 8px; margin-bottom: 6px;
+}
+.float-panel-title { font-size: 13px; font-weight: 600; }
+.float-panel-hint { font-size: 10.5px; color: var(--text-muted); }
+
+.slider-row.compact { margin: 6px 0; gap: 8px; }
+.slider-row.compact .slider-label { flex: 0 0 34px; font-size: 12px; }
+.slider-row.compact .slider-out { flex: 0 0 54px; font-size: 12px; }
+
+.float-panel-summary { margin: 6px 0 0; font-size: 11.5px; color: var(--text-muted); line-height: 1.3; }
+.float-panel-warning { margin: 4px 0 0; font-size: 11.5px; color: var(--danger); line-height: 1.3; }
+.float-panel-warning:empty, .float-panel-summary:empty { display: none; }
+
+.float-panel-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 9px; }
+.pill-btn-accent { background: var(--accent); color: #fff; border: 1px solid var(--accent); }
+.float-panel-actions button:disabled { opacity: 0.45; }
+/* Dragging feedback, and it also stops the browser interpreting a long drag as
+   a text selection or context menu. */
+.float-panel.is-dragging { cursor: grabbing; opacity: 0.92; }
+
+/* =========================================================================
+   Liquid glass theme
+   =========================================================================
+   Opt-in via a class on <body>, so Classic stays exactly as it was rather
+   than being a set of overrides on top of glass.
+
+   Almost all of it comes from re-pointing the design tokens at translucent
+   colours, since every surface in the app already paints with var(--surface)
+   or var(--surface-raised). The only thing tokens cannot express is
+   backdrop-filter, which has to name each container it applies to; that is
+   the list further down.
+
+   The readability problem is real and deliberate to solve, not to ignore:
+   translucent panels over satellite imagery can end up unreadable over a
+   bright snowfield or a dark canyon. Three things compensate:
+     - a text shadow, so glyphs keep an edge against whatever is behind them
+     - brighter borders than Classic uses, so panel boundaries stay legible
+     - a light top highlight, which reads as a glass edge and also separates
+       the panel from bright content directly above it
+   ========================================================================= */
+
+body.theme-glass {
+  /* The fill is a LIGHT tint, not a dark one, and barely present at that.
+     A dark fill is what made the first attempt read as grey: at any alpha
+     high enough to be useful, a dark blue-grey over a map is a grey wash,
+     and reducing the blur does nothing to fix that because the greyness was
+     never the blur. Removing the darkening is the fix. */
+  --surface: rgba(255, 255, 255, 0.07);
+  --surface-raised: rgba(255, 255, 255, 0.13);
+  /* With almost no fill, the border is doing nearly all the work of saying
+     where the panel ends, so it is much brighter than Classic's. */
+  --border: rgba(255, 255, 255, 0.34);
+  --border-soft: rgba(255, 255, 255, 0.18);
+  /* The shadow separates the panel from the map without tinting its interior,
+     which is the whole trick: definition at the edges, clarity in the middle. */
+  --shadow-elevated: 0 10px 30px rgba(0, 0, 0, 0.45);
+  /* 2px is enough to soften map detail into something a panel can sit on
+     without turning it to soup. brightness lifts what is behind rather than
+     darkening it, which is what keeps this from reading as a scrim, and
+     saturate stops the lift washing the colour out. */
+  --glass-blur: blur(2px) saturate(165%) brightness(1.06);
+}
+
+/* Applied to containers only, not to every element. backdrop-filter forces a
+   separate compositing layer per element, and putting one on every button in
+   a scrolling sheet is a real cost on a phone that is also drawing map tiles
+   and holding a GPS lock. */
+body.theme-glass .sheet,
+body.theme-glass .dialog,
+body.theme-glass .popover,
+body.theme-glass .float-panel,
+body.theme-glass .map-overlay,
+body.theme-glass .nav-picker,
+body.theme-glass .toast,
+body.theme-glass #status-chip,
+body.theme-glass #search-results,
+body.theme-glass #compass-ribbon,
+body.theme-glass #nav-hud,
+body.theme-glass #nav-suggest,
+body.theme-glass .fab,
+body.theme-glass .status-pill,
+/* The topbar sits directly over the map, so its controls need real blur
+   rather than only the translucent fill the tokens give them. Controls nested
+   INSIDE an already-blurred panel deliberately do not appear here: stacking
+   backdrop-filter compounds the compositing cost without looking any better. */
+body.theme-glass #topbar .icon-btn,
+body.theme-glass #search-input {
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  /* box-shadow for these lives with the bevel rules further down, so the
+     elevation and the bevel are stated in one place rather than two. */
+}
+
+
+
+/* Muted text is the first casualty of a translucent background, so it is
+   lifted here rather than left at the Classic value. */
+body.theme-glass { --text-muted: #d3dbe5; }
+
+/* Inputs and text areas sit inside an already-translucent panel, so they get a
+   darker fill instead of a second blur layer: stacking blurs compounds the
+   cost and muddies the result. */
+body.theme-glass input[type="text"],
+body.theme-glass input[type="number"],
+body.theme-glass textarea,
+body.theme-glass select {
+  background: rgba(255, 255, 255, 0.10);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+/* The backdrop stays lighter in glass mode. A heavy scrim behind a translucent
+   dialog is self-defeating: it hides exactly the thing the transparency is
+   there to reveal. */
+body.theme-glass #backdrop { background: rgba(0, 0, 0, 0.10); }
+
+/* Primary buttons are translucent too. Leaving them opaque while every other
+   button was see-through made them look like they belonged to a different
+   theme. They stay the most prominent control through colour and the bevel
+   rather than through being the only solid thing on screen. */
+body.theme-glass .btn-primary,
+body.theme-glass .pill-btn-accent,
+body.theme-glass .fab-main {
+  background: rgba(76, 139, 245, 0.62);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+/* Leaflet's own popups are outside the app's markup, so they need naming. */
+body.theme-glass .leaflet-popup-content-wrapper,
+body.theme-glass .leaflet-popup-tip {
+  background: var(--surface);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--border);
+  color: var(--text);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+}
+
+/* Panels that can be dragged say so. Applied in both themes, since dragging
+   is not a glass-only behaviour. */
+.draggable-panel { touch-action: none; }
+.draggable-panel.is-dragging { opacity: 0.92; }
+
+/* -------------------------------------------------------------------------
+   Glass mode legibility: glyphs and marks, not just text
+   -------------------------------------------------------------------------
+   text-shadow only affects text. Every icon in the app is inline SVG, and the
+   compass ticks are divs with a background colour, so neither got any of the
+   halo added above and both effectively vanished over a light map. Icons need
+   drop-shadow and marks need box-shadow.
+
+   All of it is scoped to body.theme-glass. Classic has an opaque panel behind
+   these already, and adding shadows there would muddy sharp icons for no gain.
+   ------------------------------------------------------------------------- */
+
+/* Two stacked shadows rather than one: the tight one gives a crisp edge
+   against light backgrounds, the wider one lifts the glyph off busy detail
+
+
+/* The compass ribbon reads as a row of hairlines, which is exactly the sort of
+   thin mark that disappears first. Ticks get their own glow and brighter fill,
+   since a 1px line has no interior for a shadow to sit against. */
+body.theme-glass .compass-tick {
+  background: rgba(255, 255, 255, 0.75);
+  box-shadow:
+    1px 0 0 rgba(0, 0, 0, 0.9), -1px 0 0 rgba(0, 0, 0, 0.9),
+    0 1px 0 rgba(0, 0, 0, 0.9), 0 -1px 0 rgba(0, 0, 0, 0.9);
+}
+body.theme-glass .compass-tick.major {
+  background: #ffffff;
+  box-shadow:
+    1px 0 0 rgba(0, 0, 0, 0.95), -1px 0 0 rgba(0, 0, 0, 0.95),
+    0 1px 0 rgba(0, 0, 0, 0.95), 0 -1px 0 rgba(0, 0, 0, 0.95);
+}
+body.theme-glass .compass-tick-label { color: #f2f6fa; }
+body.theme-glass .compass-tick-label.north { color: #ff7b80; }
+body.theme-glass .compass-ribbon-pointer {
+  box-shadow:
+    1px 0 0 rgba(0, 0, 0, 0.9), -1px 0 0 rgba(0, 0, 0, 0.9),
+    0 1px 0 rgba(0, 0, 0, 0.9), 0 -1px 0 rgba(0, 0, 0, 0.9);
+}
+
+
+
+/* Button labels sit on the lightest fill in the app, so they are the first
+   text to wash out. text-shadow is inherited, but stating it here means it
+
+
+/* Disabled controls fade to 0.4 in Classic, which works against a solid panel
+   but is invisible against a clear one. Lifted here so "disabled" still reads
+   as a control rather than as empty space. */
+body.theme-glass .trim-controls.is-disabled { opacity: 0.62; }
+body.theme-glass .float-panel-actions button:disabled { opacity: 0.6; }
+
+
+
+
+
+/* -------------------------------------------------------------------------
+   Glass mode: bevels, button fills, and section separation
+   -------------------------------------------------------------------------
+   Three problems, one theme:
+
+   1. Solid blue buttons read fine but red and secondary ones vanished. The
+      accent tokens were overridden for glass; --danger-soft and --accent-soft
+      were not, so a danger button was still 14% red painted over a panel that
+      is itself only 7% white. Two nearly-transparent layers is nothing.
+
+   2. Section dividers used --border-soft, which at 18% white over satellite
+      imagery is indistinguishable from the map behind it.
+
+   3. Panels had a single top highlight, which reads as a lit edge but not as
+      a raised object.
+
+   The fix for the third is a proper bevel rather than a darker fill: light on
+   the top and left, shadow on the bottom and right, all inset. That gives the
+   contrast a flat tint would give, but as an edge effect, so the middle of the
+   panel stays as clear as it is now. It is also what makes glass look like
+   glass rather than like a translucent rectangle.
+   ------------------------------------------------------------------------- */
+
+body.theme-glass {
+  /* Light from above-left, shadow below-right. The asymmetry is what sells
+     the raised look; an even outline just reads as a border. */
+  --glass-bevel:
+    inset 0 1px 0 rgba(255, 255, 255, 0.48),
+    inset 1px 0 0 rgba(255, 255, 255, 0.20),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.42),
+    inset -1px 0 0 rgba(0, 0, 0, 0.28);
+  /* Dividers need to survive being drawn over aerial imagery, so they are far
+     brighter than Classic's and carry their own shadow. */
+  --border-soft: rgba(255, 255, 255, 0.30);
+  --accent-soft: rgba(76, 139, 245, 0.55);
+  --danger-soft: rgba(230, 72, 79, 0.55);
+}
+
+/* Panels get the bevel in place of the single top highlight. */
+body.theme-glass .sheet,
+body.theme-glass .dialog,
+body.theme-glass .popover,
+body.theme-glass .float-panel,
+body.theme-glass .map-overlay,
+body.theme-glass .nav-picker,
+body.theme-glass .toast,
+body.theme-glass #status-chip,
+body.theme-glass #search-results,
+body.theme-glass #compass-ribbon,
+body.theme-glass #nav-hud,
+body.theme-glass #nav-suggest,
+body.theme-glass .fab,
+body.theme-glass .status-pill,
+body.theme-glass #topbar .icon-btn,
+body.theme-glass #search-input {
+  box-shadow: var(--shadow-elevated), var(--glass-bevel);
+}
+
+/* Buttons are the elements a user needs to identify fastest, so they get a
+   stronger bevel and an outer shadow that lifts them off the panel. */
+/* Softened and pulled onto the element's own geometry. The first version used
+   hard 1px inset lines plus an outer drop shadow: the hard bottom line read as
+   a drawn stroke rather than a lit edge, and the outer shadow sat slightly
+   outside the shape so the two never looked like the same object. Blurred
+   insets with no outer offset follow the border radius exactly and shade into
+   the surface instead of ending abruptly. */
+body.theme-glass .btn-primary,
+body.theme-glass .btn-secondary,
+body.theme-glass .btn-danger,
+body.theme-glass .pill-btn,
+body.theme-glass .tree-action,
+body.theme-glass .icon-picker-btn,
+body.theme-glass .item-actions button,
+body.theme-glass .btn-support,
+body.theme-glass .switch-track {
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.40),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.26);
+}
+
+/* FABs float directly over the map, so they need the soft bevel AND an outer
+   shadow. Without the shadow they sit flat against the imagery; the earlier
+   panel rule gave them elevation but the hard-edged bevel, and this states
+   both together rather than letting one rule silently replace the other. */
+body.theme-glass .fab {
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.40),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.26),
+    0 4px 12px rgba(0, 0, 0, 0.45);
+}
+
+/* Red and secondary buttons need a real fill, the same way blue already has
+   one. A button that cannot be told from the panel it sits on is not a
+   button. These are still translucent, just enough to be unmistakably there. */
+body.theme-glass .btn-danger,
+body.theme-glass .pill-btn-danger {
+  background: rgba(214, 58, 65, 0.62);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.38);
+}
+body.theme-glass .btn-secondary,
+body.theme-glass .pill-btn-ghost,
+body.theme-glass .tree-action {
+  background: rgba(255, 255, 255, 0.22);
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.40);
+}
+body.theme-glass .btn-primary,
+body.theme-glass .pill-btn-accent { border-color: rgba(255, 255, 255, 0.38); }
+
+/* Section boundaries: a bright line plus a dark one directly beneath it reads
+   as an engraved groove and stays visible over any imagery, where a single
+   hairline of either colour disappears against something of similar tone. */
+body.theme-glass .data-section,
+body.theme-glass .sheet-header {
+  border-color: rgba(255, 255, 255, 0.34);
+  box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.30);
+}
+body.theme-glass .toggle-row,
+body.theme-glass .popover-row,
+body.theme-glass .result-item,
+body.theme-glass .tree-row,
+body.theme-glass .layer-row {
+  border-color: rgba(255, 255, 255, 0.26);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.28);
+}
+
+/* Section headings were --text-muted, which is the first thing to disappear.
+   Uppercase small text over imagery needs to be near-white and weighted. */
+body.theme-glass .data-section h3 {
+  color: #f0f4f8;
+  font-weight: 700;
+}
+
+/* Checked states need to read at a glance while walking. */
+body.theme-glass input[type="checkbox"]:checked { accent-color: var(--accent); }
+
+/* -------------------------------------------------------------------------
+   Glass mode: inputs, red text, and the scale bar
+   ------------------------------------------------------------------------- */
+
+/* Inputs were at 10% white, which over aerial imagery is close to no field at
+   all: the placeholder, the value and the box edge all competed with whatever
+   was behind them. Text entry is the one place where seeing exactly what you
+   typed matters more than seeing the map, so these are the least transparent
+   surfaces in the theme. */
+body.theme-glass input[type="text"],
+body.theme-glass input[type="number"],
+body.theme-glass input[type="search"],
+body.theme-glass textarea,
+body.theme-glass select,
+body.theme-glass #search-input,
+body.theme-glass #region-search-input {
+  background: rgba(12, 17, 24, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  color: #ffffff;
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.45),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.16);
+}
+/* Inset rather than raised on purpose: a text field should read as a recess
+   you type into, which is the opposite of the raised bevel on buttons and is
+   what tells the two apart at a glance. */
+body.theme-glass input::placeholder,
+body.theme-glass textarea::placeholder {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+/* Red text carries warnings and destructive actions, so it has to survive
+   being drawn over anything. A white outline separates the glyph from the
+   background whatever colour that is, and the black shadow underneath stops
+   the outline itself glowing into light imagery. */
+/* Buttons are handled with the other button text further down, where they get
+   white glyphs on a black outline. Only genuine red TEXT is left here, and the
+   final rule at the end of the file supersedes this for the warning line. */
+
+
+/* The scale bar is deliberately NOT restyled for glass. Classic draws it dark
+   with its own halo, designed to stay legible over any basemap, and that still
+   holds here. Recolouring it white made it inconsistent with Classic for no
+   gain, and the first attempt changed only the borders and left the text dark,
+   which inverted the control against itself. */
+
+
+/* -------------------------------------------------------------------------
+   Glass mode, final pass: no outer shadows, white text with black outlines
+   ------------------------------------------------------------------------- */
+
+/* Outer drop shadows removed. They put a dark halo around every panel edge,
+   which is the one thing that still read as "dark overlay" in a theme built
+   to avoid exactly that. The bevel already says where a panel ends, and it
+   does it with an edge rather than with a cloud of shade around it. */
+body.theme-glass {
+  /* Panels keep their elevation. Removing this flattened them against the map
+     and was a misreading of "remove shadows", which meant the blurred glow
+     around text and icons, not the lift under a panel. */
+  --shadow-elevated: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+body.theme-glass .sheet,
+body.theme-glass .dialog,
+body.theme-glass .popover,
+body.theme-glass .float-panel,
+body.theme-glass .map-overlay,
+body.theme-glass .nav-picker,
+body.theme-glass .toast,
+body.theme-glass #status-chip,
+body.theme-glass #search-results,
+body.theme-glass #compass-ribbon,
+body.theme-glass #nav-hud,
+body.theme-glass #nav-suggest,
+body.theme-glass .status-pill,
+body.theme-glass #topbar .icon-btn,
+body.theme-glass #search-input {
+  box-shadow: var(--shadow-elevated), var(--glass-bevel);
+}
+body.theme-glass .fab {
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.40),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.26),
+    0 4px 12px rgba(0, 0, 0, 0.45);
+}
+
+/* Blue pill buttons were still solid. .pill-btn carries the accent fill on the
+   base class, so overriding only .pill-btn-accent left More and Trim opaque
+   while Delete beside them was see-through. */
+body.theme-glass .pill-btn {
+  background: rgba(76, 139, 245, 0.62);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid rgba(255, 255, 255, 0.38);
+}
+body.theme-glass .pill-btn-ghost {
+  background: rgba(255, 255, 255, 0.22);
+  color: var(--text);
+}
+body.theme-glass .pill-btn-danger,
+body.theme-glass .item-actions button.danger {
+  background: rgba(214, 58, 65, 0.62);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+}
+
+
+
+/* -------------------------------------------------------------------------
+   Glass mode: crisp black borders, not glows
+   -------------------------------------------------------------------------
+   Everything above used blurred shadows, and a shadow with zero offset and a
+   blur radius IS a glow: it spreads outward evenly and softens the glyph edge
+   rather than defining it. Against busy imagery that reads as haze around the
+   text instead of a boundary.
+
+   A border needs zero blur and offsets in every direction, so the copies land
+   just outside the glyph and butt against it cleanly. Eight directions for
+   text (four would leave gaps on diagonal strokes), four for icons, which are
+   already thick enough not to need the corners.
+
+   Declared last so it wins over every earlier text-shadow and filter.
+   ------------------------------------------------------------------------- */
+
+body.theme-glass {
+  --outline-text:
+    1px 1px 0 #000, -1px 1px 0 #000, 1px -1px 0 #000, -1px -1px 0 #000,
+    0 1px 0 #000, 0 -1px 0 #000, 1px 0 0 #000, -1px 0 0 #000;
+  --outline-icon:
+    drop-shadow(1px 0 0 #000) drop-shadow(-1px 0 0 #000)
+    drop-shadow(0 1px 0 #000) drop-shadow(0 -1px 0 #000);
+}
+
+body.theme-glass .sheet,
+body.theme-glass .dialog,
+body.theme-glass .popover,
+body.theme-glass .float-panel,
+body.theme-glass .map-overlay,
+body.theme-glass .toast,
+body.theme-glass #status-chip,
+body.theme-glass #compass-ribbon,
+body.theme-glass #nav-hud,
+body.theme-glass #nav-suggest,
+body.theme-glass .status-pill,
+body.theme-glass button,
+body.theme-glass .btn-primary,
+body.theme-glass .btn-secondary,
+body.theme-glass .btn-danger,
+body.theme-glass .pill-btn,
+body.theme-glass .pill-btn-danger,
+body.theme-glass .pill-btn-ghost,
+body.theme-glass .pill-btn-accent,
+body.theme-glass .tree-action,
+body.theme-glass .tree-name,
+body.theme-glass .item-actions button,
+body.theme-glass .toggle-title,
+body.theme-glass label,
+body.theme-glass .hint,
+body.theme-glass .slider-label,
+body.theme-glass .slider-out,
+body.theme-glass .compass-tick-label,
+body.theme-glass .data-section h3 {
+  text-shadow: var(--outline-text);
+}
+
+body.theme-glass .fab svg,
+body.theme-glass .icon-btn svg,
+body.theme-glass .pill-icon-btn svg,
+body.theme-glass .sheet-close svg,
+body.theme-glass .tree-icon svg,
+body.theme-glass .tree-twisty,
+body.theme-glass .icon-picker-btn svg,
+body.theme-glass .map-overlay svg,
+body.theme-glass .status-pill svg,
+body.theme-glass input[type="checkbox"],
+body.theme-glass input[type="range"] {
+  filter: var(--outline-icon);
+}
+
+
+
+/* Red warning text keeps its colour and gets a white border with a black one
+   outside it, so it separates from both light and dark backgrounds. Still a
+   border, no blur. */
+body.theme-glass .float-panel-warning,
+body.theme-glass .hint.danger,
+body.theme-glass .text-danger,
+body.theme-glass .danger:not(button) {
+  color: #ff6b72;
+  /* Black border only. The white ring that used to sit inside it made the
+     glyphs read as white-outlined shapes that happened to be filled red,
+     rather than as red text with an edge. */
+  text-shadow: var(--outline-text);
+}
+
+/* Blue buttons get the border too. The earlier exclusion assumed a solid blue
+   fill behind white text, which is no longer true: these are translucent, so
+   the actual backdrop is whatever the map happens to be, and white on a pale
+   satellite tile has no contrast at all without an outline. */
+body.theme-glass .btn-primary,
+body.theme-glass .pill-btn-accent,
+body.theme-glass .fab-main { text-shadow: var(--outline-text); }
+
+/* Leaflet builds its own popup markup outside the app's DOM, so the bevel has
+   to name it. Without this the route popup was the one floating panel with no
+   edge treatment at all. */
+body.theme-glass .leaflet-popup-content-wrapper {
+  box-shadow: var(--shadow-elevated), var(--glass-bevel);
+}
+
+/* The GPS dot is a bare coloured circle with no panel behind it, so it needs
+   its own edge to stay readable against light imagery. box-shadow rather than
+   a border, which would shrink the dot rather than surround it. */
+body.theme-glass .gps-dot {
+  box-shadow:
+    1px 0 0 rgba(0, 0, 0, 0.9), -1px 0 0 rgba(0, 0, 0, 0.9),
+    0 1px 0 rgba(0, 0, 0, 0.9), 0 -1px 0 rgba(0, 0, 0, 0.9);
+}
+
+/* The record button when pinned outside the collapsible menu. It sits alone
+   over the map with no neighbours to group it, so it carries a stronger edge
+   than the buttons in the stack do. */
+.fab.pinned {
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35), var(--shadow-elevated);
+}
+/* While recording, the pulse animation owns box-shadow, so the pinned ring is
+   folded into its keyframes rather than fighting them. */
+.fab.pinned.recording { box-shadow: none; }
+@keyframes recordGlowPinned {
+  0%, 100% {
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.45), 0 0 0 4px rgba(230, 72, 79, 0.6), var(--shadow-elevated);
+  }
+  50% {
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.45), 0 0 0 14px rgba(230, 72, 79, 0), var(--shadow-elevated);
+  }
+}
+.fab.pinned.recording { animation: recordGlowPinned 1.4s ease-in-out infinite; }
+body.theme-glass .fab.pinned { border: 1px solid rgba(255, 255, 255, 0.45); }
+
+/* Storage failure alert, shown in the Data sheet when the mirror has writes it
+   could not complete. Deliberately loud: a file that was never written is data
+   the user believes is backed up and is not. */
+.storage-alert {
+  margin: 10px 0 14px; padding: 12px 14px;
+  border: 1px solid var(--danger); border-radius: var(--radius-md);
+  background: var(--danger-soft);
+}
+.storage-alert-title { color: var(--danger); font-weight: 700; margin-bottom: 4px; }
+
+/* The warning badge on the menu and data buttons. A dot would be easy to miss
+   on a busy map, so it is a full glyph replacement: the icon itself becomes an
+   exclamation mark and the button goes red. */
+.fab.has-storage-error { background: var(--danger); }
+.fab.has-storage-error svg { display: none; }
+.fab.has-storage-error::after {
+  content: "!";
+  font-size: 24px; font-weight: 800; color: #fff; line-height: 1;
+}
+body.theme-glass .fab.has-storage-error { background: rgba(214, 58, 65, 0.75); }
+body.theme-glass .fab.has-storage-error::after { text-shadow: var(--outline-text); }
+
+/* Import browser rows: icon then label, together on the left.
+   .data-list li sets justify-content: space-between, which is right for its
+   usual two-child "label ... action" shape but pushes an icon and its own
+   label to opposite edges of the row. flex-start is what keeps them adjacent,
+   and the label takes the remaining width so long filenames ellipsise rather
+   than wrapping under the icon. */
+#import-browser-list li {
+  display: flex; align-items: center; gap: 10px;
+  justify-content: flex-start;
+}
+#import-browser-list li > span:last-child {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#import-browser-list li .tree-icon { flex: 0 0 auto; }
+
+/* Current location in the import browser. Given its own bar above the actions
+   rather than a hint below them, because "import this folder" is meaningless
+   without knowing which folder that is, and the answer should be visible at
+   the moment of deciding rather than further down the sheet. */
+.path-bar {
+  margin: 8px 0 4px; padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-soft);
+  font-size: 12px; font-family: monospace;
+  color: var(--text);
+  word-break: break-all;
+}
+
+/* Links in body copy. Cyan rather than the accent blue on purpose: accent is
+   the colour of buttons, and a link that shares it reads as a control the user
+   failed to tap. Distinct hue, same job. */
+:root { --link: #4dd0e1; }
+.sheet-body a, .hint a { color: var(--link); text-decoration: none; border-bottom: 1px solid rgba(77, 208, 225, 0.4); }
+.sheet-body a:active, .hint a:active { border-bottom-color: var(--link); }
+body.theme-glass .sheet-body a,
+body.theme-glass .hint a { color: #6fe3f2; text-shadow: var(--outline-text); }
+
+/* Tip button. Pastel green, outlined rather than filled.
+   Outlined because a solid fill is what the app uses for primary actions, and
+   an optional tip in an app that advertises itself as free should not shout
+   louder than Save.
+   Pastel rather than a saturated green on purpose: --success (#3ecf8e) already
+   means "good status" here, on the GPS dot and search result labels, so the
+   tip button is deliberately lighter and softer than that to avoid reading as
+   a state indicator. */
+.btn-support {
+  /* Centred as a group with equal gaps, rather than space-between. On a
+     full-width button space-between would strand a heart at each far edge
+     with the text marooned in the middle; keeping them close reads as
+     decoration for the label rather than three separate things. */
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  padding: 13px 16px; border-radius: var(--radius-md);
+  background: rgba(143, 227, 180, 0.12);
+  border: 1px solid rgba(143, 227, 180, 0.5);
+  color: #8fe3b4; font-weight: 600; font-size: 15px;
+}
+.btn-support:active { background: rgba(143, 227, 180, 0.22); }
+/* Bevelled like every other button. It is the only outlined control in the
+   app, so without this it read as flat next to the filled ones and looked
+   less tappable than it is. */
+.btn-support {
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.16),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.22);
+}
+/* Deliberately larger than the app's other icons, which are sized to sit
+   beside 12px list text. This label is 15px and the hearts flank it, so they
+   are scaled to match its cap height rather than to the icon set's default. */
+.btn-support-icon { display: inline-flex; width: 22px; height: 22px; flex: 0 0 auto; }
+.btn-support-icon svg { width: 22px; height: 22px; }
+.btn-support-label { line-height: 1; }
+body.theme-glass .btn-support {
+  background: rgba(143, 227, 180, 0.22);
+  border-color: rgba(143, 227, 180, 0.65);
+  color: #a8f0c6;
+  text-shadow: var(--outline-text);
+}
+body.theme-glass .btn-support-icon svg { filter: var(--outline-icon); }

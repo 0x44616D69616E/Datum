@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Datum</string>
+    <string name="title_activity_main">Datum</string>
+    <string name="package_name">org.freemaps.datum</string>
+    <string name="custom_url_scheme">org.freemaps.datum</string>
+</resources>
