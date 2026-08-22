@@ -6,7 +6,7 @@ Datum works entirely offline once you've downloaded a region: satellite imagery,
 
 No account. No analytics. Nothing you record is uploaded anywhere. Your waypoints, routes, and tracks are written to a folder on your own device as standard GPX files, which means they're yours to open in other apps, back up, or share, and they never go anywhere you don't send them.
 
-### [Download Datum v1.6.0 for Android](https://github.com/0x44616D69616E/Datum/releases/download/v1.6.0/datum-1.6.0.apk)
+### [Download Datum v1.6.6 for Android](https://github.com/0x44616D69616E/Datum/releases/download/v1.6.6/datum-1.6.6.apk)
 
 Free, no ads, no account, no subscription, no tracking. 6.4 MB.
 [All releases](https://github.com/0x44616D69616E/Datum/releases) · [Installation help](https://freemaps.org)
@@ -126,23 +126,17 @@ True-north compass needle, tap to reset rotation. Optional heading ribbon driven
 
 Datum is MIT licensed and free. There is no sign-up, no subscription, no analytics SDK, and no server that could collect anything even if it wanted to. It was written because good offline mapping shouldn't cost a monthly fee.
 
-## What's new in 1.6.0
-
-### Added
-
-- **The compass button now does three things.** Tap while the map is rotated to straighten it, tap again to lock the map to the direction you are facing, tap once more to unlock. Hold it to lock straight away.
-- **The compass ribbon is on by default**, and turning it off is remembered.
-- **Clear browsing cache**, in Settings. Panning caches tiles separately from areas you download deliberately; this clears those and shows their size without touching your downloads.
-- **A way to support the project** in Settings. Datum stays free either way.
+## What's new in 1.6.6
 
 ### Changed
 
-- **No more duplicate download entries.** A larger area replaces a smaller one it covers, and the same area downloaded with different layers merges into one entry.
-- **The download button stays disabled after finishing**, and returns when you search a new area.
-
-### Fixed
-
-- **Unbinding a flag puts it back where you dropped it.** Dropping a flag near a route binds it automatically and snaps it onto the line; unbinding now undoes the move as well as the binding.
+- **Removed Datum's dependency on Google Play Services.** Live location
+  tracking now goes through Android's own location service directly,
+  instead of through a Google-provided component. Tested thoroughly
+  on-device: there's no change to how GPS tracking behaves day to day. This
+  was the last thing standing between Datum and a listing on F-Droid, and it
+  also means Datum runs cleanly on devices and Android builds that don't
+  ship Google's services at all.
 
 Full history is in [CHANGELOG.md](CHANGELOG.md), and older releases are listed under [Releases](https://github.com/0x44616D69616E/Datum/releases).
 
@@ -240,7 +234,7 @@ www/
     storage.js             - filesystem layout, backups, session folders
     radarPlayback.js       - weather radar frame fetching + playback
     boundariesLayer.js     - bundled country/state borders (vector, offline)
-    gps.js                 - Capacitor Geolocation wrapper
+    gps.js                 - Web Geolocation API wrapper (no GMS dependency)
     compassHeading.js      - device magnetometer heading
     geocoding.js           - Nominatim place search
     icons.js               - SVG icon set + waypoint icon types
@@ -262,7 +256,7 @@ The data layer runs one way on purpose: IndexedDB is authoritative and the folde
 
 ## Installing the APK
 
-**[Download Datum v1.6.0](https://github.com/0x44616D69616E/Datum/releases/download/v1.6.0/datum-1.6.0.apk)**, or browse [all releases](https://github.com/0x44616D69616E/Datum/releases).
+**[Download Datum v1.6.6](https://github.com/0x44616D69616E/Datum/releases/download/v1.6.6/datum-1.6.6.apk)**, or browse [all releases](https://github.com/0x44616D69616E/Datum/releases).
 
 Datum isn't distributed through the Play Store, so Android shows two separate warnings the first time you install it:
 
