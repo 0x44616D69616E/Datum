@@ -2,6 +2,18 @@
 
 All notable changes to Datum are documented here.
 
+## v1.6.6
+
+### Changed
+
+- **Removed Datum's dependency on Google Play Services.** Live location
+  tracking now goes through Android's location service directly instead of
+  through a Google-provided component. This was the last thing standing
+  between Datum and a listing on F-Droid, and it also means Datum works
+  cleanly on devices and Android builds that don't ship Google's services at
+  all. Tested thoroughly on-device: there's no change to how GPS tracking
+  behaves day to day.
+
 ## v1.6.0
 
 ### Added
