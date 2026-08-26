@@ -27,9 +27,16 @@ android {
         applicationId "org.freemaps.datum"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 10606
-        versionName "1.6.6"
+        versionCode 10607
+        versionName "1.6.7"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        // Disabled: AGP rasterizes drawable-v24/ic_launcher_foreground.xml into
+        // per-density legacy PNGs at build time for pre-Android-8 devices, and that
+        // generation is not reproducible across build environments (confirmed against
+        // F-Droid's own reproducible-builds docs). The real launcher icon at every
+        // density is already provided as flat PNGs in mipmap-*/ by ensure-branding.js,
+        // so nothing actually depends on these generated files existing.
+        vectorDrawables.generatedDensities = []
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
