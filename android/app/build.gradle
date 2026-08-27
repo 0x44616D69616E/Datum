@@ -23,12 +23,18 @@ android {
 android {
     namespace "org.freemaps.datum"
     compileSdk rootProject.ext.compileSdkVersion
+    // Pinned alongside compileSdk: unpinned build-tools let AAPT2/d8 versions drift
+    // between this device and F-Droid'''s build server, which produced real
+    // classes.dex/resources.arsc differences in the reproducible-build check.
+    // 34.0.0 matches compileSdk 34 and is the version F-Droid'''s own docs recommend
+    // for compatibility with their apksigcopier comparison tooling.
+    buildToolsVersion "34.0.0"
     defaultConfig {
         applicationId "org.freemaps.datum"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 10607
-        versionName "1.6.7"
+        versionCode 10608
+        versionName "1.6.8"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         // Disabled: AGP rasterizes drawable-v24/ic_launcher_foreground.xml into
         // per-density legacy PNGs at build time for pre-Android-8 devices, and that
