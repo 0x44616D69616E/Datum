@@ -1,0 +1,4 @@
+Removed weather radar, since it was the one feature reaching a server in the
+background even with the layer off by default. GPX import now uses Android's
+own file picker instead of Datum's folder browser, and the app no longer
+requests all-files access.

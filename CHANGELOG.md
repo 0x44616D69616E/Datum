@@ -2,7 +2,7 @@
 
 All notable changes to Datum are documented here.
 
-## Unreleased
+## v1.6.10
 
 ### Removed
 
