@@ -17,4 +17,4 @@ Your data is written to a folder you choose as standard GPX files as you create 
 
 There is no account, no advertising, no analytics and no server.
 
-Note on the anti-feature flag: the satellite imagery layer is served by Esri, and the optional weather radar layer by RainViewer. Both are proprietary services. Every other layer comes from public domain government or openly licensed sources. Place search uses Nominatim. All network access is initiated by the user; nothing is contacted in the background.
+Note on the anti-feature flag: the satellite imagery layer is served by Esri, a proprietary service. Every other layer comes from public domain government or openly licensed sources. Place search uses Nominatim. All network access is initiated by the user; nothing is contacted in the background.

@@ -80,21 +80,6 @@ export const LAYER_SOURCES = {
     maxZoom: 16,
     downloadable: true
   },
-  weatherRadar: {
-    id: 'weatherRadar',
-    label: 'Weather Radar',
-    // RainViewer - free, no API key. Handled entirely by radarPlayback.js,
-    // NOT the generic offline tile cache: radar has multiple time frames,
-    // and the same z/x/y tile means completely different imagery per
-    // frame, so caching it under the generic layerId/z/x/y key would show
-    // stale/wrong frames once playback switches frames. It's also
-    // inherently live-only by nature - old radar tells you nothing, so
-    // there's no real loss in it never being part of the offline
-    // download flow.
-    isRadarPlayback: true,
-    attribution: 'RainViewer',
-    downloadable: false
-  },
   borders: {
     id: 'borders',
     label: 'Borders (states & countries)',
@@ -129,7 +114,6 @@ export const LAYER_SOURCES = {
 // "Damian's Hybrid" preset: public land ownership over satellite/trails/topo.
 export const DEFAULT_LAYER_STACK = [
   { id: 'landOwnership', on: true, opacity: 0.6 },
-  { id: 'weatherRadar', on: false, opacity: 0.75 },
   { id: 'borders', on: false, opacity: 0.8 },
   { id: 'streetLabels', on: false, opacity: 1 },
   { id: 'satellite', on: true, opacity: 0.4 },
@@ -164,7 +148,6 @@ export const ORDERED_PRESETS = {
     // shading, over USGS Topo as the base. OpenTopoMap off, since usgsTopo
     // is doing that job and stacking both just muddies the contours.
     stack: [
-      { id: 'weatherRadar', on: false, opacity: 0 },
       { id: 'borders', on: false, opacity: 0 },
       { id: 'streetLabels', on: false, opacity: 0 },
       { id: 'satellite', on: true, opacity: 0.26 },
@@ -177,7 +160,7 @@ export const ORDERED_PRESETS = {
 };
 
 export const PRESETS = {
-  satelliteOnly: { satellite: { on: true, opacity: 1 }, topo: { on: false }, usgsTopo: { on: false }, trail: { on: false }, landOwnership: { on: false }, weatherRadar: { on: false }, borders: { on: false }, streetLabels: { on: false } },
-  topoOnly: { satellite: { on: false }, topo: { on: true, opacity: 1 }, usgsTopo: { on: false }, trail: { on: false }, landOwnership: { on: false }, weatherRadar: { on: false }, borders: { on: false }, streetLabels: { on: false } },
-  hybrid: { satellite: { on: true, opacity: 1 }, topo: { on: true, opacity: 0.5 }, usgsTopo: { on: false }, trail: { on: true, opacity: 1 }, landOwnership: { on: false }, weatherRadar: { on: false }, borders: { on: false }, streetLabels: { on: false } }
+  satelliteOnly: { satellite: { on: true, opacity: 1 }, topo: { on: false }, usgsTopo: { on: false }, trail: { on: false }, landOwnership: { on: false }, borders: { on: false }, streetLabels: { on: false } },
+  topoOnly: { satellite: { on: false }, topo: { on: true, opacity: 1 }, usgsTopo: { on: false }, trail: { on: false }, landOwnership: { on: false }, borders: { on: false }, streetLabels: { on: false } },
+  hybrid: { satellite: { on: true, opacity: 1 }, topo: { on: true, opacity: 0.5 }, usgsTopo: { on: false }, trail: { on: true, opacity: 1 }, landOwnership: { on: false }, borders: { on: false }, streetLabels: { on: false } }
 };

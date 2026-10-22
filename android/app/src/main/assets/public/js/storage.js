@@ -19,15 +19,15 @@
 import * as Store from './dataStore.js';
 
 let CapFilesystem = null;
-let CapAllFilesAccess = null;
+let CapDocumentPicker = null;
 try {
   // eslint-disable-next-line no-undef
   CapFilesystem = Capacitor?.Plugins?.Filesystem || null;
   // eslint-disable-next-line no-undef
-  CapAllFilesAccess = Capacitor?.Plugins?.AllFilesAccess || null;
+  CapDocumentPicker = Capacitor?.Plugins?.DocumentPicker || null;
 } catch (e) {
   CapFilesystem = null;
-  CapAllFilesAccess = null;
+  CapDocumentPicker = null;
 }
 
 // Renamed from 'Cairn' in the Datum rebrand. NOTE: this changes where
@@ -41,52 +41,36 @@ export function isFilesystemAvailable() {
   return !!CapFilesystem;
 }
 
-// ---------- All Files Access (needed only for the real folder browser -
-// the Documents/Downloads choice below works without it) ----------
-export function isAllFilesAccessPluginAvailable() {
-  return !!CapAllFilesAccess;
+// ---------- Document picker (Storage Access Framework) ----------
+// Replaces the old "All files access" (MANAGE_EXTERNAL_STORAGE) based
+// folder browser and file browser. A GPX import is exactly what Android's
+// own system document picker is for: one or more files the user explicitly
+// chose, read through the ContentResolver, with no broad storage
+// permission declared or requested at all. The Documents/Downloads storage
+// presets below don't go through this at all - they already work without
+// any special permission, confirmed on-device.
+export function isDocumentPickerAvailable() {
+  return !!CapDocumentPicker;
 }
 
-export async function isAllFilesAccessGranted() {
-  if (!CapAllFilesAccess) return false;
-  const res = await CapAllFilesAccess.isGranted();
-  return !!res.granted;
+// Returns an array of { name, data } - one per file the user picked. The
+// native side allows multi-select, so "pick one file" and "pick several to
+// import at once" are the same call; a single-element array just means they
+// tapped one file.
+export async function pickGpxFiles() {
+  if (!CapDocumentPicker) throw new Error('Document picker plugin not available - run "npm run fix-manifest" and rebuild.');
+  const res = await CapDocumentPicker.pickFiles();
+  return res.files || [];
 }
 
-export async function requestAllFilesAccess() {
-  if (!CapAllFilesAccess) throw new Error('AllFilesAccess plugin not available - run "npm run fix-manifest" and rebuild.');
-  await CapAllFilesAccess.requestAccess(); // sends the user to a system Settings screen; resolves immediately, doesn't wait for their choice
-}
-
-// ---------- Real folder browsing, once All Files Access is granted -
-// lists real subfolders under the external storage root. ----------
-// Folders and matching files together, for the import browser. Separate from
-// listFolders so the storage-location picker keeps showing only directories,
-// where a file would just be noise.
-export async function listEntries(relativePath, extension) {
-  if (!CapFilesystem) throw new Error('Filesystem access is not available in this environment.');
-  const res = await CapFilesystem.readdir({ path: relativePath, directory: 'EXTERNAL_STORAGE' });
-  const folders = res.files.filter(f => f.type === 'directory').map(f => f.name).sort((a, b) => a.localeCompare(b));
-  const files = res.files
-    .filter(f => f.type !== 'directory')
-    .map(f => f.name)
-    .filter(n => !extension || n.toLowerCase().endsWith(extension))
-    .sort((a, b) => a.localeCompare(b));
-  return { folders, files };
-}
-
-// Reads a file from anywhere on external storage, by path relative to its
-// root. Used by the import browser, which can wander outside Datum's folders.
-export async function readExternalPath(relativePath) {
-  if (!CapFilesystem) throw new Error('Filesystem access is not available in this environment.');
-  const res = await CapFilesystem.readFile({ path: relativePath, directory: 'EXTERNAL_STORAGE', encoding: 'utf8' });
-  return res.data;
-}
-
-export async function listFolders(relativePath) {
-  if (!CapFilesystem) throw new Error('Filesystem access is not available in this environment.');
-  const res = await CapFilesystem.readdir({ path: relativePath, directory: 'EXTERNAL_STORAGE' });
-  return res.files.filter(f => f.type === 'directory').map(f => f.name).sort((a, b) => a.localeCompare(b));
+// Opens the system "App info" settings screen for Datum, so a user whose
+// storage writes are failing (permission revoked some other way, an
+// unusual device policy, etc.) has somewhere to go. Not tied to any one
+// permission - unlike the old All Files Access shortcut, this is a generic
+// escape hatch now that nothing in the app requests a special permission.
+export async function openAppSettings() {
+  if (!CapDocumentPicker) throw new Error('Plugin not available - run "npm run fix-manifest" and rebuild.');
+  await CapDocumentPicker.openAppSettings();
 }
 
 // ---------- Storage location setup and backup export/import ----------

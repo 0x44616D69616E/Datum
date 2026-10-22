@@ -3,7 +3,6 @@
 import { LAYER_SOURCES, DEFAULT_LAYER_STACK, PRESETS, ORDERED_PRESETS } from './layers.js';
 import { createOfflineTileLayer, downloadRegion, deleteTilesInRegion, deleteAllTiles, getTileCacheStats, estimateStorageUsage, clearBrowseCache, getBrowseCacheStats } from './tileCache.js';
 import { buildBordersLayer } from './boundariesLayer.js';
-import * as Radar from './radarPlayback.js';
 import * as GPS from './gps.js';
 import * as Store from './dataStore.js';
 import * as Geocode from './geocoding.js';
@@ -368,90 +367,15 @@ function askStorageFolder() {
     openDialog('dialog-storage-folder');
     const docsBtn = document.getElementById('btn-folder-documents');
     const dlBtn = document.getElementById('btn-folder-downloads');
-    const browseBtn = document.getElementById('btn-folder-browse');
-    const cleanup = () => { docsBtn.onclick = null; dlBtn.onclick = null; browseBtn.onclick = null; closeOverlay('dialog-storage-folder'); };
+    const cleanup = () => { docsBtn.onclick = null; dlBtn.onclick = null; closeOverlay('dialog-storage-folder'); };
     docsBtn.onclick = () => { cleanup(); resolve({ directory: 'DOCUMENTS', relativePath: '', label: 'Documents/Datum' }); };
     // relativePath must be 'Download' here. EXTERNAL_STORAGE is the storage
     // root, so an empty path wrote to /storage/emulated/0/Datum while telling
     // the user it was in Downloads.
     dlBtn.onclick = () => { cleanup(); resolve({ directory: 'EXTERNAL_STORAGE', relativePath: Storage.DOWNLOADS_RELATIVE_PATH, label: 'Download/Datum' }); };
-    browseBtn.onclick = async () => { cleanup(); resolve(await browseForFolder()); };
     // Backdrop tap leaves the folder unchanged. Callers treat null as "no
-    // selection made" already, which is the same outcome as a failed browse.
+    // selection made" already.
     dialogDismissHandlers.set('dialog-storage-folder', () => { cleanup(); resolve(null); });
-  });
-}
-
-// Real folder browsing - requires Android's "All files access" special
-// permission, which (unlike a normal runtime permission) can only be
-// granted through a system Settings screen, not an in-app dialog. If
-// it's not granted yet, this sends the user there and asks them to tap
-// Browse again afterward - Android gives no callback for when they
-// return, so there's no way to auto-resume exactly where they left off.
-async function browseForFolder() {
-  if (!Storage.isAllFilesAccessPluginAvailable()) {
-    logError('Folder browsing needs a rebuild first - run "npm run fix-manifest" then rebuild the APK.');
-    return null;
-  }
-  const granted = await Storage.isAllFilesAccessGranted();
-  if (!granted) {
-    const ok = await askConfirm(
-      'Allow file access?',
-      'Browsing for a folder needs "All files access." The next screen is Android\'s own settings page - turn on the toggle for Datum, then come back here and tap Browse again.'
-    );
-    if (ok) await Storage.requestAllFilesAccess();
-    return null;
-  }
-
-  return new Promise((resolve) => {
-    let currentPath = '';
-    const pathEl = document.getElementById('folder-browser-path');
-    const destEl = document.getElementById('folder-browser-destination');
-    const listEl = document.getElementById('folder-browser-list');
-    const upBtn = document.getElementById('btn-folder-browser-up');
-    const selectBtn = document.getElementById('btn-folder-browser-select');
-    const closeBtn = document.querySelector('.sheet-close[data-target="sheet-folder-browser"]');
-
-    async function render() {
-      pathEl.textContent = currentPath || 'Storage root';
-      destEl.textContent = `${currentPath ? currentPath + '/' : ''}${Storage.STORAGE_DIR}`;
-      upBtn.disabled = !currentPath;
-      listEl.innerHTML = '<li><span>Loading…</span></li>';
-      let folders = [];
-      try {
-        folders = await Storage.listFolders(currentPath);
-      } catch (e) {
-        logError(`Couldn't read that folder: ${e.message}`);
-      }
-      listEl.innerHTML = '';
-      if (!folders.length) {
-        const li = document.createElement('li');
-        li.innerHTML = '<span><small>No subfolders here</small></span>';
-        listEl.appendChild(li);
-      }
-      folders.forEach((name) => {
-        const li = document.createElement('li');
-        li.innerHTML = `<span>📁 ${name}</span>`;
-        li.onclick = () => { currentPath = currentPath ? `${currentPath}/${name}` : name; render(); };
-        listEl.appendChild(li);
-      });
-    }
-
-    upBtn.onclick = () => {
-      if (!currentPath) return;
-      currentPath = currentPath.includes('/') ? currentPath.slice(0, currentPath.lastIndexOf('/')) : '';
-      render();
-    };
-    selectBtn.onclick = () => {
-      closeOverlay('sheet-folder-browser');
-      resolve({ directory: 'EXTERNAL_STORAGE', relativePath: currentPath, label: `${currentPath || 'Storage'}/Datum` });
-    };
-    // Backing out via the sheet's own X should resolve null, same as
-    // cancelling the Documents/Downloads dialog does.
-    closeBtn.onclick = () => { closeOverlay('sheet-folder-browser'); resolve(null); };
-
-    openOverlay('sheet-folder-browser');
-    render();
   });
 }
 
@@ -636,7 +560,7 @@ leftHandedToggle.addEventListener('change', () => {
 
 // On by default now - the route tool measures distance precisely, but a
 // glanceable reference is still generally useful. Toggled from Settings
-// ("Hide scale bar"). When hidden, the legend/radar overlay stack drops
+// ("Hide scale bar"). When hidden, the legend overlay stack drops
 // down to reclaim the space it was leaving clear above the scale bar,
 // rather than leaving that gap empty.
 let scaleBarHidden = localStorage.getItem('hideScaleBar') === 'true';
@@ -690,8 +614,8 @@ metricToggle.addEventListener('change', async () => {
 let hasCenteredOnFirstFix = false;
 
 // ---------- Generalized layer manager ----------
-// Every layer - tile-based (satellite/topo/trail/landOwnership/weatherRadar)
-// or vector (borders) - is represented as { id, on, opacity } in an ordered
+// Every layer - tile-based (satellite/topo/trail/landOwnership) or vector
+// (borders) - is represented as { id, on, opacity } in an ordered
 // array. Array position 0 = rendered on top. Persisted so your order and
 // opacity choices survive an app restart. Adding a brand new layer in the
 // future only requires an entry in layers.js - this manager and its UI
@@ -716,62 +640,6 @@ function saveLayerStack() {
 let layerStack = loadLayerStack();
 const activeLeafletLayers = {}; // id -> leaflet layer instance, built lazily and reused
 
-// ---------- Weather radar playback state ----------
-// Previous versions of this used two alternating tile layers (one visible,
-// one preloading invisibly) to avoid a blank flash when switching frames.
-// That kept producing an intermittent "blank every other frame" bug that
-// resisted fixing blind - the failure mode of relying on opacity swaps
-// and z-order between two live layer instances has too many moving parts
-// to verify without live testing. This is a simpler, more robust design:
-// ONE tile layer, and before switching its URL, the target frame's tiles
-// for the current viewport are explicitly pre-fetched with plain fetch()
-// calls. Since those requests hit the same CDN URLs the tile layer will
-// request moments later, they land in the browser's normal HTTP cache, so
-// the actual .setUrl() swap resolves instantly instead of waiting on the
-// network - without needing a second layer instance at all.
-// Every past/nowcast frame gets its OWN Leaflet tile layer, all built and
-// added to the map (at opacity 0, except whichever is current) the first
-// time the radar layer is turned on. Cycling frames afterward is pure
-// opacity toggling between already-loaded layers - no setUrl(), no
-// preload-then-swap dance, no DOM tile churn at all during playback. That
-// dance is what kept causing the flicker/blank-frame behavior in earlier
-// attempts; this sidesteps it entirely once the one-time upfront load
-// finishes. The tradeoff is a heavier initial load (every frame's tiles
-// for the current view, not just one), which is a fair trade for genuinely
-// flicker-free cycling afterward.
-let radarFrameList = null;
-let radarFrameIndex = null;
-let radarPlaying = false;
-let radarPlayTimer = null;
-let radarLayers = []; // one tile layer per frame, index-aligned with radarFrameList.frames
-let radarLayersBuilt = false;
-let radarLayersFullyLoaded = false; // true only once every layer has actually finished loading its tiles
-let radarLoadError = null; // set when a load attempt fails, so the UI can show *something* instead of a stuck "Loading…"
-
-let radarFrameListPromise = null;
-
-async function ensureRadarFrameList() {
-  if (radarFrameList) return radarFrameList;
-  if (!radarFrameListPromise) {
-    radarFrameListPromise = Radar.getFrameList()
-      .then((list) => {
-        radarFrameList = list;
-        const pastCount = list.frames.filter(f => !f.isForecast).length;
-        radarFrameIndex = Math.max(0, pastCount - 1);
-        return list;
-      })
-      .catch((err) => {
-        // Don't let one failed attempt (a momentary network blip, RainViewer
-        // hiccup, etc.) permanently poison every future try - clearing this
-        // back to null means the next toggle-on actually attempts a fresh
-        // fetch instead of instantly re-failing on the same dead promise.
-        radarFrameListPromise = null;
-        throw err;
-      });
-  }
-  return radarFrameListPromise;
-}
-
 async function getOrBuildLeafletLayer(id) {
   if (activeLeafletLayers[id]) return activeLeafletLayers[id];
   const source = LAYER_SOURCES[id];
@@ -781,143 +649,12 @@ async function getOrBuildLeafletLayer(id) {
   let layer;
   if (source.isVectorBorders) {
     layer = await buildBordersLayer(L, opacity);
-  } else if (source.isRadarPlayback) {
-    await ensureRadarFrameList();
-    if (!radarLayersBuilt) {
-      radarLayers = radarFrameList.frames.map((frame, i) =>
-        Radar.buildRadarLayer(L, radarFrameList.host, frame, i === radarFrameIndex ? opacity : 0)
-      );
-      radarLayersBuilt = true;
-      // Attach every frame right away, not just the currently-selected
-      // one - attaching a layer to the map is what makes Leaflet start
-      // fetching its tiles at all. Without this, every hidden frame
-      // never actually began loading in the background, so the "wait
-      // for all frames" check below had nothing real to wait for and
-      // falsely reported them done instantly - meaning most frames were
-      // still genuinely blank whenever playback actually reached them.
-      radarLayers.forEach((rl) => { if (!map.hasLayer(rl)) rl.addTo(map); });
-    }
-    layer = radarLayers[radarFrameIndex];
-  } else if (source.isCloudSatellite) {
-    await ensureRadarFrameList();
-    const satFrames = radarFrameList.satFrames || [];
-    if (!satFrames.length) throw new Error('No satellite frames available from RainViewer.');
-    const latest = satFrames[satFrames.length - 1];
-    layer = Radar.buildSatelliteLayer(L, radarFrameList.host, latest, opacity);
   } else {
     layer = createOfflineTileLayer(L, source, opacity);
   }
 
   activeLeafletLayers[id] = layer;
   return layer;
-}
-
-// Waits for every radar frame layer to actually finish loading its tiles
-// (Leaflet's 'load' event, with a per-layer timeout fallback so one slow
-// tile can't hang the whole thing indefinitely). This has to happen BEFORE
-// cycling is allowed - the ghosting bug was exactly this: a hidden layer
-// could still be mid-load when it became the current one, so its tiles
-// faded in individually as they arrived instead of all appearing at once.
-//
-// The `_loading` check has a real race: reading it synchronously right
-// after the layer is created can read false simply because Leaflet's
-// (async) tile loading hasn't started yet - not because it already
-// finished - which would let cycling begin before that layer's tiles
-// actually exist. Attaching the 'load' listener FIRST, then giving
-// Leaflet a moment to actually start loading before checking, closes
-// that gap.
-async function waitForAllRadarLayersLoaded() {
-  const waits = radarLayers.map((layer) => new Promise((resolve) => {
-    let done = false;
-    const finish = () => { if (!done) { done = true; resolve(); } };
-    layer.once('load', finish);
-    // 15s, not 4s: all ~13 frames now load in parallel, which means
-    // 100+ tile requests funneling through the browser's ~6-connections-
-    // per-host limit. On mobile data that legitimately takes longer than
-    // 4s, and since these timers all start together, a short timeout
-    // fired for most layers and declared them "loaded" while their tiles
-    // were still in flight - which is exactly the lie that let playback
-    // start cycling through frames that were still blank. This is only a
-    // safety valve against a genuinely hung tile; the normal path is the
-    // 'load' event above, which fires as soon as a frame is really ready.
-    setTimeout(finish, 15000);
-    // Give Leaflet a tick to actually start loading before trusting
-    // `_loading` as a signal that this layer has nothing to wait for.
-    setTimeout(() => { if (!layer._loading) finish(); }, 50);
-  }));
-  await Promise.all(waits);
-  radarLayersFullyLoaded = true;
-  updateRadarPlaybackUI();
-}
-
-function setRadarFrame(index) {
-  if (!radarFrameList || !radarLayersBuilt || !radarLayersFullyLoaded) return;
-  const clamped = Math.max(0, Math.min(radarFrameList.frames.length - 1, index));
-  const currentOpacity = (layerStack.find(l => l.id === 'weatherRadar') || {}).opacity ?? 1;
-
-  radarLayers.forEach((layer, i) => {
-    if (i !== clamped) layer.setOpacity(0);
-  });
-  radarFrameIndex = clamped;
-  radarLayers[radarFrameIndex].setOpacity(currentOpacity);
-  activeLeafletLayers.weatherRadar = radarLayers[radarFrameIndex];
-  updateRadarPlaybackUI();
-}
-
-function updateRadarPlaybackUI() {
-  const timeEl = document.getElementById('radar-frame-time');
-  const playBtn = document.getElementById('btn-radar-play');
-  if (!timeEl) return;
-  if (radarLoadError) {
-    timeEl.textContent = radarLoadError;
-    document.getElementById('btn-radar-play').classList.add('disabled');
-    document.getElementById('btn-radar-prev').classList.add('disabled');
-    document.getElementById('btn-radar-next').classList.add('disabled');
-    return;
-  }
-  if (!radarFrameList) return;
-  if (!radarLayersFullyLoaded) {
-    timeEl.textContent = 'Loading…';
-    document.getElementById('btn-radar-play').classList.add('disabled');
-    document.getElementById('btn-radar-prev').classList.add('disabled');
-    document.getElementById('btn-radar-next').classList.add('disabled');
-    return;
-  }
-  document.getElementById('btn-radar-play').classList.remove('disabled');
-  document.getElementById('btn-radar-prev').classList.remove('disabled');
-  document.getElementById('btn-radar-next').classList.remove('disabled');
-  const frame = radarFrameList.frames[radarFrameIndex];
-  timeEl.textContent = Radar.formatFrameTime(frame);
-  if (playBtn) playBtn.innerHTML = radarPlaying ? ICONS.stop : ICONS.play;
-}
-
-function scheduleNextRadarFrame() {
-  radarPlayTimer = setTimeout(() => {
-    if (!radarPlaying) return;
-    let next = radarFrameIndex + 1;
-    if (next >= radarFrameList.frames.length) next = 0; // loop
-    setRadarFrame(next);
-    if (radarPlaying) scheduleNextRadarFrame();
-  }, 300);
-}
-
-function toggleRadarPlayback() {
-  radarPlaying = !radarPlaying;
-  if (radarPlaying) {
-    scheduleNextRadarFrame();
-  } else if (radarPlayTimer) {
-    clearTimeout(radarPlayTimer);
-    radarPlayTimer = null;
-  }
-  updateRadarPlaybackUI();
-}
-
-function stopRadarPlaybackIfRunning() {
-  if (radarPlaying) {
-    radarPlaying = false;
-    if (radarPlayTimer) clearTimeout(radarPlayTimer);
-    radarPlayTimer = null;
-  }
 }
 
 async function applyLayerStack() {
@@ -930,28 +667,11 @@ async function applyLayerStack() {
       continue;
     }
     if (entry.on) {
-      // Radar's frames show/hide via opacity (only the selected frame is
-      // ever non-zero), so the generic "apply the slider opacity to the
-      // layer" below must not run against radar - activeLeafletLayers
-      // points at whichever frame is currently selected, and blanket-
-      // setting it here fights setRadarFrame's opacity bookkeeping
-      // (and leaves every OTHER frame stuck at whatever opacity it had
-      // when the slider last moved while it happened to be selected).
-      if (entry.id === 'weatherRadar' && radarLayersBuilt) {
-        radarLayers.forEach((rl, i) => {
-          rl.setOpacity(i === radarFrameIndex ? entry.opacity : 0);
-          if (!map.hasLayer(rl)) rl.addTo(map);
-        });
-      } else {
-        if (layer.setOpacity) layer.setOpacity(entry.opacity);
-        else if (layer.eachLayer) layer.eachLayer(l => l.setStyle && l.setStyle({ opacity: entry.opacity }));
-        if (!map.hasLayer(layer)) layer.addTo(map);
-      }
+      if (layer.setOpacity) layer.setOpacity(entry.opacity);
+      else if (layer.eachLayer) layer.eachLayer(l => l.setStyle && l.setStyle({ opacity: entry.opacity }));
+      if (!map.hasLayer(layer)) layer.addTo(map);
     } else if (map.hasLayer(layer)) {
       map.removeLayer(layer);
-      if (entry.id === 'weatherRadar' && radarLayersBuilt) {
-        radarLayers.forEach((rl) => { if (map.hasLayer(rl)) map.removeLayer(rl); });
-      }
     }
   }
   // Enforce z-order: array[0] should end up frontmost. Processing back-to-
@@ -960,17 +680,6 @@ async function applyLayerStack() {
   for (let i = layerStack.length - 1; i >= 0; i--) {
     const entry = layerStack[i];
     if (!entry.on) continue;
-    // Radar is many stacked frame layers, not one - ALL of them have to
-    // come forward at this stack position, not just the currently-selected
-    // frame that activeLeafletLayers.weatherRadar points at. Without this,
-    // every non-selected frame stayed at the bottom of the tile stack,
-    // buried under satellite/topo - its tiles loaded fine but were
-    // invisible, which is exactly what made playback look like most
-    // frames were blank.
-    if (entry.id === 'weatherRadar' && radarLayersBuilt) {
-      radarLayers.forEach((rl) => rl.bringToFront && rl.bringToFront());
-      continue;
-    }
     const layer = activeLeafletLayers[entry.id];
     if (!layer) continue;
     if (layer.bringToFront) layer.bringToFront();
@@ -1037,44 +746,6 @@ function renderLegendSwatches(container, items) {
     row.innerHTML = `<img src="data:${item.contentType};base64,${item.imageData}" width="28" height="28" style="image-rendering: pixelated; border-radius: 3px;" /><span>${item.label}</span>`;
     container.appendChild(row);
   });
-}
-
-// Real RGBA stops sampled directly from RainViewer's own published color
-// table for the "Universal Blue" scheme (the one this app's tile URL
-// actually requests) at https://www.rainviewer.com/files/rainviewer_api_colors_table.csv -
-// not a guess. dBZ intensity thresholds (light/moderate/heavy/hail) match
-// standard meteorological convention (NWS/mesonet references).
-const RADAR_GRADIENT_STOPS = [
-  { dbz: 0, color: '#827b69' },
-  { dbz: 15, color: '#88ddee' },
-  { dbz: 20, color: '#00a3e0' },
-  { dbz: 30, color: '#005588' },
-  { dbz: 35, color: '#ffee00' },
-  { dbz: 40, color: '#ffaa00' },
-  { dbz: 45, color: '#ff4400' },
-  { dbz: 50, color: '#c10000' },
-  { dbz: 55, color: '#ffaaff' },
-  { dbz: 65, color: '#ffffff' }
-];
-const RADAR_DBZ_MIN = 0;
-const RADAR_DBZ_MAX = 65;
-
-function renderRadarLegend(container) {
-  container.innerHTML = '';
-
-  const gradientCss = RADAR_GRADIENT_STOPS
-    .map(s => `${s.color} ${((s.dbz - RADAR_DBZ_MIN) / (RADAR_DBZ_MAX - RADAR_DBZ_MIN) * 100).toFixed(0)}%`)
-    .join(', ');
-
-  const bar = document.createElement('div');
-  bar.className = 'radar-gradient-bar';
-  bar.style.background = `linear-gradient(to right, ${gradientCss})`;
-  container.appendChild(bar);
-
-  const labels = document.createElement('div');
-  labels.className = 'radar-gradient-labels';
-  labels.innerHTML = `<span>Light</span><span>Moderate</span><span>Heavy</span><span>Hail</span>`;
-  container.appendChild(labels);
 }
 
 function renderLayerManagerUI() {
@@ -1201,7 +872,6 @@ function onDragEnd(e) {
 }
 function setLayerOn(id, on) {
   layerStack.find(l => l.id === id).on = on;
-  if (id === 'weatherRadar' && !on) stopRadarPlaybackIfRunning();
   saveLayerStack();
   renderLayerManagerUI();
   applyLayerStack();
@@ -1213,40 +883,13 @@ function setLayerOpacity(id, opacity) {
   applyLayerStack();
 }
 
-// Shows/hides the floating map-overlay legends and radar controls based on
-// current layer state, and populates them the first time each becomes
-// visible. Called on startup and whenever a layer is toggled, so these
-// stay in sync with the map regardless of which sheet (if any) is open.
-// Legends are always shown at full opacity, independent of the layer's
-// own transparency slider - they're a reference key, not part of the map
-// imagery itself.
-async function attemptLoadRadar() {
-  radarLoadError = null; // clear any previous failure - this is a fresh attempt
-  updateRadarPlaybackUI(); // shows "Loading…" immediately if not ready yet
-  try {
-    await ensureRadarFrameList();
-    await getOrBuildLeafletLayer('weatherRadar'); // builds all frame layers if not already built
-    await applyLayerStack(); // attaches them to the map so their tiles actually start loading
-    if (!radarLayersFullyLoaded) await waitForAllRadarLayersLoaded();
-    else updateRadarPlaybackUI();
-  } catch (e) {
-    logError(`Failed to load radar frames: ${e.message}`);
-    radarLoadError = 'Couldn\'t load radar - tap to retry';
-    updateRadarPlaybackUI();
-  }
-}
-
+// Shows/hides the floating map-overlay legend based on current layer state,
+// and populates it the first time it becomes visible. Called on startup and
+// whenever a layer is toggled, so it stays in sync with the map regardless
+// of which sheet (if any) is open. The legend is always shown at full
+// opacity, independent of the layer's own transparency slider - it's a
+// reference key, not part of the map imagery itself.
 function updateMapOverlays() {
-  const radarEntry = layerStack.find(l => l.id === 'weatherRadar');
-  const radarOverlay = document.getElementById('map-overlay-radar');
-  if (radarEntry && radarEntry.on) {
-    radarOverlay.classList.remove('hidden');
-    renderRadarLegend(document.getElementById('radar-legend'));
-    attemptLoadRadar();
-  } else {
-    radarOverlay.classList.add('hidden');
-  }
-
   const blmEntry = layerStack.find(l => l.id === 'landOwnership');
   const blmOverlay = document.getElementById('map-overlay-blm');
   if (blmEntry && blmEntry.on) {
@@ -1260,11 +903,6 @@ function updateMapOverlays() {
   }
   refreshControlLayout(); // legend set just changed - overlap may have appeared or cleared
 }
-
-document.getElementById('btn-radar-play').onclick = toggleRadarPlayback;
-document.getElementById('btn-radar-prev').onclick = () => { stopRadarPlaybackIfRunning(); setRadarFrame(radarFrameIndex - 1); };
-document.getElementById('btn-radar-next').onclick = () => { stopRadarPlaybackIfRunning(); setRadarFrame(radarFrameIndex + 1); };
-document.getElementById('radar-frame-time').onclick = () => { if (radarLoadError) attemptLoadRadar(); };
 
 document.querySelectorAll('.map-overlay-header').forEach((header) => {
   header.onclick = () => {
@@ -1478,18 +1116,20 @@ Mirror.onMirrorHealthChange(renderStorageHealth);
 renderStorageHealth();
 
 document.getElementById('btn-storage-permissions').onclick = async () => {
-  // Opens Android's all-files-access screen for Datum directly. The plugin
-  // already exists for the first-run permission prompt, so this is the same
-  // path rather than a second mechanism.
-  if (!Storage.isAllFilesAccessPluginAvailable()) {
+  // Datum no longer declares any special storage permission (Documents and
+  // Download both work without one), so this is a generic escape hatch
+  // rather than a specific permission grant - a write can still fail for
+  // reasons outside Datum's control (a device policy, storage genuinely
+  // removed, etc.), and Android's own app-info screen is the place to check.
+  if (!Storage.isDocumentPickerAvailable()) {
     await showAlert('Not available', 'Open Android Settings, find Datum under Apps, and check its storage permissions.');
     return;
   }
   try {
-    await Storage.requestAllFilesAccess();
-    showToast('Grant storage access, then come back and tap Try again.');
+    await Storage.openAppSettings();
+    showToast('Check storage permissions, then come back and tap Try again.');
   } catch (e) {
-    logError(`Could not open permission settings: ${e.message}`);
+    logError(`Could not open settings: ${e.message}`);
     await showAlert('Could not open settings', 'Open Android Settings, find Datum under Apps, and check its storage permissions.');
   }
 };
@@ -1672,12 +1312,12 @@ document.getElementById('btn-tidy-storage').onclick = async () => {
   }
 };
 
-// ---------- Import browser ----------
-// Reuses the same walking pattern as the storage-folder picker, but selects
-// files rather than directories, so a GPX sitting anywhere on the device can
-// be brought in without first moving it into Datum's own folders by hand.
-
-let importBrowserPath = '';
+// ---------- GPX import ----------
+// A single tap opens Android's own document picker (multi-select enabled),
+// reads whichever file(s) the user chose through the ContentResolver, and
+// imports them. This replaced an in-app folder browser that needed "All
+// files access" (MANAGE_EXTERNAL_STORAGE) just to let someone pick a file -
+// the system picker does the same job with no special permission at all.
 
 async function askImportDestination(summary) {
   document.getElementById('import-destination-summary').textContent = summary;
@@ -1775,117 +1415,58 @@ async function importParsedInto(parsedList, destination, label) {
   logInfo(`Imported ${res.added} item(s) into the current session.`);
 }
 
-async function renderImportBrowser() {
-  const listEl = document.getElementById('import-browser-list');
-  // The full path rather than just the relative fragment: "Download" alone
-  // does not tell you which storage you are looking at, and the action beneath
-  // it operates on this folder.
-  document.getElementById('import-browser-path').textContent =
-    `/storage/emulated/0/${importBrowserPath}`.replace(/\/$/, '');
-  document.getElementById('btn-import-browser-up').disabled = !importBrowserPath;
-  listEl.innerHTML = '<li><span>Loading...</span></li>';
-
-  let entries = { folders: [], files: [] };
+// Launches the system document picker (multi-select), parses whatever GPX
+// the user chose, and routes the result through the same destination
+// prompt and import logic a single-file import always used. One unreadable
+// file doesn't abandon the rest, since the user may have selected several
+// at once.
+async function pickAndImportGpx() {
+  if (!Storage.isDocumentPickerAvailable()) {
+    await showAlert('Not available', 'Importing needs a rebuild first. Run "npm run fix-manifest" and rebuild the APK.');
+    return;
+  }
+  let picked;
   try {
-    entries = await Storage.listEntries(importBrowserPath, '.gpx');
+    picked = await Storage.pickGpxFiles();
   } catch (e) {
-    listEl.innerHTML = '';
-    const li = document.createElement('li');
-    li.innerHTML = `<span><small>Could not read that folder: ${e.message}</small></span>`;
-    listEl.appendChild(li);
+    // Backing out of the system picker without choosing anything also
+    // lands here on some Android versions - not a real error.
+    return;
+  }
+  if (!picked.length) return;
+
+  const parsedList = [];
+  const failed = [];
+  for (const file of picked) {
+    try {
+      const parsed = Formats.parseGpx(file.data);
+      if (parsed.errors.length && !parsed.waypoints.length && !parsed.routes.length && !parsed.tracks.length) {
+        failed.push(file.name);
+        continue;
+      }
+      parsedList.push(parsed);
+    } catch (e) {
+      failed.push(file.name);
+    }
+  }
+  if (!parsedList.length) {
+    await showAlert('Could not read that file',
+      failed.length ? `None of the selected file(s) could be read: ${failed.join(', ')}.`
+        : 'No waypoints, routes or tracks were found.');
     return;
   }
 
-  listEl.innerHTML = '';
-  document.getElementById('btn-import-browser-folder').disabled = entries.files.length === 0;
-
-  // Icon rather than a "Folder" / "GPX file" subtitle: the subtitle repeated
-  // what the row already was and made every line look the same at a glance,
-  // which is the thing a browser most needs to avoid. Reuses .tree-icon so
-  // both lists size their icons identically.
-  const browserRow = (label, iconName, onClick) => {
-    const li = document.createElement('li');
-    const icon = document.createElement('span');
-    icon.className = 'tree-icon';
-    icon.innerHTML = ICONS[iconName] || '';
-    const text = document.createElement('span');
-    text.textContent = label;
-    li.appendChild(icon);
-    li.appendChild(text);
-    li.onclick = onClick;
-    return li;
-  };
-
-  for (const folder of entries.folders) {
-    listEl.appendChild(browserRow(folder, 'folder', () => {
-      importBrowserPath = importBrowserPath ? `${importBrowserPath}/${folder}` : folder;
-      renderImportBrowser();
-    }));
-  }
-  for (const file of entries.files) {
-    listEl.appendChild(browserRow(file, 'file', () => importSinglePath(file)));
-  }
-  if (!entries.folders.length && !entries.files.length) {
-    const li = document.createElement('li');
-    li.innerHTML = '<span><small>Nothing here</small></span>';
-    listEl.appendChild(li);
-  }
+  const total = parsedList.reduce((n, p) => n + p.waypoints.length + p.routes.length + p.tracks.length, 0);
+  const label = picked.length === 1
+    ? picked[0].name.replace(/\.gpx$/i, '')
+    : `Imported ${new Date().toLocaleDateString()}`;
+  const summary = picked.length === 1
+    ? `${picked[0].name} contains ${total} item(s).`
+    : `${picked.length} file(s) contain ${total} item(s)${failed.length ? `, and ${failed.length} could not be read` : ''}.`;
+  const dest = await askImportDestination(summary);
+  if (!dest) return;
+  await importParsedInto(parsedList, dest, label);
 }
-
-async function importSinglePath(filename) {
-  const full = importBrowserPath ? `${importBrowserPath}/${filename}` : filename;
-  try {
-    const parsed = Formats.parseGpx(await Storage.readExternalPath(full));
-    if (parsed.errors.length && !parsed.waypoints.length && !parsed.routes.length && !parsed.tracks.length) {
-      await showAlert('Could not read that file', parsed.errors[0]);
-      return;
-    }
-    const counts = `${parsed.waypoints.length} flag(s), ${parsed.routes.length} route(s), ${parsed.tracks.length} track(s)`;
-    const dest = await askImportDestination(`${filename} contains ${counts}.`);
-    if (!dest) return;
-    closeOverlay('sheet-import-browser');
-    await importParsedInto([parsed], dest, filename.replace(/\.gpx$/i, ''));
-  } catch (e) {
-    logError(`Import failed for ${full}: ${e.message}`);
-    await showAlert('Import failed', e.message);
-  }
-}
-
-document.getElementById('btn-import-browser-up').onclick = () => {
-  importBrowserPath = importBrowserPath.includes('/')
-    ? importBrowserPath.slice(0, importBrowserPath.lastIndexOf('/'))
-    : '';
-  renderImportBrowser();
-};
-
-document.getElementById('btn-import-browser-folder').onclick = async () => {
-  try {
-    const { files } = await Storage.listEntries(importBrowserPath, '.gpx');
-    if (!files.length) return;
-    const parsedList = [];
-    const failed = [];
-    for (const f of files) {
-      const full = importBrowserPath ? `${importBrowserPath}/${f}` : f;
-      try {
-        parsedList.push(Formats.parseGpx(await Storage.readExternalPath(full)));
-      } catch (e) {
-        // One unreadable file must not abandon the rest, since these come from
-        // wherever the user happened to be browsing.
-        failed.push(f);
-      }
-    }
-    const total = parsedList.reduce((n, p) => n + p.waypoints.length + p.routes.length + p.tracks.length, 0);
-    const label = importBrowserPath.split('/').pop() || 'Imported';
-    const dest = await askImportDestination(
-      `${files.length} file(s) in this folder contain ${total} item(s)${failed.length ? `, and ${failed.length} could not be read` : ''}.`);
-    if (!dest) return;
-    closeOverlay('sheet-import-browser');
-    await importParsedInto(parsedList, dest, label);
-  } catch (e) {
-    logError(`Folder import failed: ${e.message}`);
-    await showAlert('Import failed', e.message);
-  }
-};
 
 // ---------- Delete everything ----------
 // The most destructive action in the app, so the dialog states the scale
@@ -2008,21 +1589,7 @@ document.getElementById('btn-delete-everything-confirm').onclick = async () => {
   }
 };
 
-document.getElementById('btn-import-browse').onclick = async () => {
-  if (!Storage.isAllFilesAccessPluginAvailable()) {
-    await showAlert('Not available', 'Browsing needs a rebuild first. Run "npm run fix-manifest" and rebuild the APK.');
-    return;
-  }
-  if (!await Storage.isAllFilesAccessGranted()) {
-    const ok = await askConfirm('Allow file access?',
-      'Browsing for a file needs "All files access". The next screen is Android\'s own settings page: turn on the toggle for Datum, then come back and tap Import a file again.');
-    if (ok) await Storage.requestAllFilesAccess();
-    return;
-  }
-  importBrowserPath = '';
-  openOverlay('sheet-import-browser');
-  renderImportBrowser();
-};
+document.getElementById('btn-import-browse').onclick = pickAndImportGpx;
 
 document.getElementById('btn-sync-storage').onclick = async () => {
   try {
@@ -2226,7 +1793,7 @@ function refreshLayerTiles(layer) {
     }
     return;
   }
-  // Radar is a group of preloaded frame layers rather than a single grid,
+  // A layer can be a group (e.g. borders) rather than a single grid,
   // so recurse instead of silently skipping it.
   if (typeof layer.eachLayer === 'function') layer.eachLayer(refreshLayerTiles);
 }
