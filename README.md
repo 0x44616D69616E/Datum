@@ -2,7 +2,7 @@
 
 A fully offline topo, satellite, and trail map for Android, built for the moment you lose signal and still need to know where you are.
 
-Datum works entirely offline once you've downloaded a region: satellite imagery, topo contours, trails, public land ownership, borders, and street labels are all cached on-device, not fetched on demand. Weather radar is the one exception, since that's inherently live data and requires a connection to be meaningful.
+Datum works entirely offline once you've downloaded a region: satellite imagery, topo contours, trails, public land ownership, borders, and street labels are all cached on-device, not fetched on demand.
 
 No account. No analytics. Nothing you record is uploaded anywhere. Your waypoints, routes, and tracks are written to a folder on your own device as standard GPX files, which means they're yours to open in other apps, back up, or share, and they never go anywhere you don't send them.
 
@@ -71,7 +71,7 @@ Free, no ads, no account, no subscription, no tracking. 6.4 MB.
 
 ### It genuinely works with no signal
 
-Not "mostly offline". Download a region before you leave and everything keeps working in airplane mode, deep in a canyon, with the tower thirty miles behind you: the map draws, GPS locks, waypoints drop, routes plan, tracks record. Tiles are cached on your device, not streamed on demand. The only thing that needs a connection is weather radar, because live radar can't be anything else.
+Not "mostly offline". Download a region before you leave and everything keeps working in airplane mode, deep in a canyon, with the tower thirty miles behind you: the map draws, GPS locks, waypoints drop, routes plan, tracks record. Tiles are cached on your device, not streamed on demand.
 
 ### Seven map layers, stacked how you want
 
@@ -94,10 +94,6 @@ Thirteen icon types: water, shelter, tent, campfire, food, power, parking, photo
 ### Plan routes, record tracks
 
 Plot a route point by point or by connecting waypoints you've already dropped. Trim it back from either end afterwards with a live preview. Record a track while you walk with live distance and time, then name and save it when you stop.
-
-### Weather radar you can scrub through
-
-Play or step through roughly the last two hours of radar, with a reflectivity legend taken from RainViewer's own published colour table rather than an approximation. Useful for deciding whether that cell is coming your way or going past.
 
 ### Sessions: one map per trip
 
@@ -175,7 +171,7 @@ Map tiles are not stored here. They stay cached inside the app and can always be
 3. Pick a zoom range and which layers you want (satellite is by far the largest, leave it unchecked if you just want topo + trail to save space).
 4. Tap Start Download and wait for it to finish.
 
-After that, airplane mode works fine: map, GPS position, waypoints, routes, and recording all keep working with zero signal. Weather radar is the one layer that needs a live connection by nature.
+After that, airplane mode works fine: map, GPS position, waypoints, routes, and recording all keep working with zero signal.
 
 ## Building from source
 
@@ -209,8 +205,8 @@ cd android
 
 `npm run fix-manifest` is idempotent and safe to run after every sync. It does five things, all of which `npx cap sync` would otherwise undo or never do:
 
-1. Re-adds the location and storage permissions, which `cap sync` can silently drop from the generated Android manifest.
-2. Generates `AllFilesAccessPlugin.java` and registers it, for the storage folder browser.
+1. Re-adds the location permissions, which `cap sync` can silently drop from the generated Android manifest.
+2. Generates `DocumentPickerPlugin.java` and registers it, for GPX import via Android's own system file picker (Storage Access Framework) - no special storage permission declared at all.
 3. Generates `CompassSensorPlugin.java` and registers it, for the heading ribbon.
 4. Registers Datum as a handler for `.gpx` files, so it appears in Android's "open with" list.
 5. Sets the app name and copies the launcher icon from `resources/android/` into the native project.
@@ -232,7 +228,6 @@ www/
     share.js               - joins records to files: import, export, adoption
     formats/gpx.js         - GPX 1.1 read and write
     storage.js             - filesystem layout, backups, session folders
-    radarPlayback.js       - weather radar frame fetching + playback
     boundariesLayer.js     - bundled country/state borders (vector, offline)
     gps.js                 - Web Geolocation API wrapper (no GMS dependency)
     compassHeading.js      - device magnetometer heading
@@ -242,7 +237,7 @@ www/
   data/boundaries/         - bundled country/state GeoJSON
 scripts/
   ensure-manifest-permissions.js  - re-adds permissions cap sync can drop
-  ensure-storage-plugin.js        - generates + registers AllFilesAccessPlugin.java
+  ensure-document-picker-plugin.js - generates + registers DocumentPickerPlugin.java
   ensure-compass-plugin.js        - generates + registers CompassSensorPlugin.java
   ensure-gpx-intent.js            - registers Datum as a .gpx file handler
   ensure-branding.js              - sets the app name and installs the launcher icon

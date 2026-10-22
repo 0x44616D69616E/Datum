@@ -2,7 +2,36 @@
 
 All notable changes to Datum are documented here.
 
-## v1.6.6
+## Unreleased
+
+### Removed
+
+- **The Weather Radar layer is gone.** It was the one feature that reached
+  out to a server (RainViewer) on its own, including right at launch even
+  with the layer switched off by default, which didn't match the "nothing
+  is contacted in the background" claim in the app's own anti-feature
+  disclosure. Rather than just fix the disclosure, the layer itself,
+  `radarPlayback.js`, its playback controls, and its legend have all been
+  removed.
+
+### Changed
+
+- **Importing a GPX file now goes through Android's own system file
+  picker (Storage Access Framework)** instead of Datum's own folder-browser
+  screen. Pick one or more `.gpx` files and Datum reads just those files -
+  nothing else on the device.
+- **The "Browse for folder" option is gone** from the storage-folder picker.
+  Documents and Download remain as the two destinations for new GPX
+  output.
+- **`MANAGE_EXTERNAL_STORAGE` ("All files access") is no longer
+  requested or declared.** It was only ever used for the folder browser and
+  file-import browser above, and neither needs it anymore. `fix-manifest`
+  strips the permission out of an existing `android/` project automatically
+  on sync.
+- **The anti-feature disclosure in the Play/F-Droid description no longer
+  mentions RainViewer**, since nothing in the app talks to it anymore.
+
+
 
 ### Changed
 

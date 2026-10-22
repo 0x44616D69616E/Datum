@@ -18,7 +18,6 @@ This is the complete reference. If you just want to get outside, read [First run
 - [Recording tracks](#recording-tracks)
 - [Sessions](#sessions)
 - [Offline downloads](#offline-downloads)
-- [Weather radar](#weather-radar)
 - [Your files](#your-files)
 - [Importing](#importing)
 - [Sharing and privacy](#sharing-and-privacy)
@@ -39,11 +38,7 @@ Datum asks two things the first time you open it.
 
 If you skip storage setup, everything still works. Your data lives in the app and nothing is lost; it just is not written out as files until you choose a folder.
 
-### Granting storage access
-
-Choosing a folder needs Android's "All files access" permission. Datum opens the system settings page for you; turn on the toggle for Datum and come back.
-
-This permission sounds broad because Android has no narrower option for writing to a folder you chose. Datum only ever reads and writes inside the folder you pick.
+Datum doesn't request any special storage permission for this. Choosing Documents or Download writes there directly; importing a GPX file from elsewhere goes through Android's own system file picker, which grants access to just the file you pick.
 
 ---
 
@@ -58,7 +53,7 @@ The single most important thing to do before a trip.
 5. Choose your **zoom range** and **which layers** to include.
 6. Tap **Start download** and wait.
 
-Once that finishes, put the phone in airplane mode and check the map still draws. Everything except weather radar works with no signal at all.
+Once that finishes, put the phone in airplane mode and check the map still draws. Everything works with no signal at all.
 
 ### Choosing a zoom range
 
@@ -173,7 +168,6 @@ Transparency is what makes layer stacking useful. Satellite at about a quarter o
 | Public Land Ownership | BLM Surface Management Agency | Who owns or manages the ground |
 | Borders | US Census, Natural Earth | State and country lines, works offline from bundled data |
 | Street & Place Labels | OpenStreetMap | Road and place names |
-| Weather Radar | RainViewer | Live precipitation, needs a connection |
 
 ### Public land ownership
 
@@ -395,16 +389,6 @@ Clearing the browsing cache frees space without touching downloads. Those tiles 
 
 ---
 
-## Weather radar
-
-Turn on the Weather Radar layer. **This is the one feature that needs a connection**, because live radar cannot be anything else.
-
-Controls appear at the bottom: play, step forward, step back, through roughly the last two hours.
-
-The legend uses RainViewer's own published colour table, so the intensities mean what they say.
-
----
-
 ## Your files
 
 Datum writes everything to your storage folder as standard GPX, automatically, as you create it. There is no export step.
@@ -618,7 +602,6 @@ Datum will not request tiles above these, so asking for more costs nothing.
 | Downloaded areas | Yes |
 | Search | No |
 | Downloading new areas | No |
-| Weather radar | No |
 
 ---
 

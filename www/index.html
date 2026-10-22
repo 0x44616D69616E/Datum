@@ -389,47 +389,10 @@
   <h2>Choose a folder</h2>
   <p class="hint" style="font-size:14.5px; color: var(--text);">Datum will create a "Datum" folder inside whichever one you pick.</p>
   <div class="dialog-actions">
-    <button id="btn-folder-browse" class="btn-primary full-width">Browse for folder…</button>
-  </div>
-  <div class="dialog-actions">
     <button id="btn-folder-documents" class="btn-secondary full-width">Documents</button>
   </div>
   <div class="dialog-actions">
     <button id="btn-folder-downloads" class="btn-secondary full-width">Download folder</button>
-  </div>
-</div>
-
-<!-- Real folder browser - lists actual subfolders under external storage,
-     requires "All files access" (Android 11+ special permission, granted
-     via a system Settings screen since there's no normal runtime dialog
-     for it). Falls back to the Documents/Downloads dialog above if that
-     permission isn't granted or the plugin isn't available. -->
-<div id="sheet-import-browser" class="sheet hidden">
-  <div class="sheet-handle"></div>
-  <div class="sheet-header"><h2>Import GPX</h2><button class="icon-btn sheet-close" data-target="sheet-import-browser" data-icon="close"></button></div>
-  <div class="sheet-body">
-    <p class="hint">Tap a GPX file to import it, or import every GPX in the folder you are looking at.</p>
-    <div class="path-bar" id="import-browser-path"></div>
-    <div class="button-row">
-      <button id="btn-import-browser-up" class="btn-secondary">Up one level</button>
-      <button id="btn-import-browser-folder" class="btn-primary">Import this folder</button>
-    </div>
-    <ul id="import-browser-list" class="data-list"></ul>
-  </div>
-</div>
-
-<div id="sheet-folder-browser" class="sheet hidden">
-  <div class="sheet-handle"></div>
-  <div class="sheet-header"><h2 id="folder-browser-path">Storage</h2><button class="icon-btn sheet-close" data-target="sheet-folder-browser" data-icon="close"></button></div>
-  <div class="sheet-body">
-    <div class="button-row">
-      <button id="btn-folder-browser-up" class="btn-secondary">↑ Up a level</button>
-    </div>
-    <ul id="folder-browser-list" class="data-list"></ul>
-    <p class="hint">Data will be saved to:<br><strong id="folder-browser-destination" style="color: var(--text); font-size: 13.5px; word-break: break-all;"></strong></p>
-    <div class="button-row">
-      <button id="btn-folder-browser-select" class="btn-primary full-width">Select this folder</button>
-    </div>
   </div>
 </div>
 
@@ -598,28 +561,11 @@
   <p class="hint hidden" id="nav-off-route-warning"></p>
 </div>
 
-<!-- Map overlays: legends and radar playback controls live ON the map
-     itself (bottom-left), not buried in the Layers sheet, so they stay
-     visible whenever their layer is on regardless of which sheet is open.
-     Both sit in one stacking container so they never overlap each other,
-     and each has a collapsible header. -->
+<!-- Map overlays: legends live ON the map itself (bottom-left), not buried
+     in the Layers sheet, so they stay visible whenever their layer is on
+     regardless of which sheet is open. They sit in one stacking container
+     so multiple never overlap each other, each with a collapsible header. -->
 <div id="map-overlays-stack">
-  <div id="map-overlay-radar" class="map-overlay hidden">
-    <div class="map-overlay-header" data-target="map-overlay-radar">
-      <span>Weather Radar</span>
-      <span class="chevron" data-icon="chevronDown"></span>
-    </div>
-    <div class="map-overlay-body">
-      <div class="radar-controls">
-        <button class="icon-btn tiny" id="btn-radar-prev" data-icon="chevronUp" style="transform:rotate(-90deg)"></button>
-        <button class="icon-btn tiny" id="btn-radar-play" data-icon="play"></button>
-        <button class="icon-btn tiny" id="btn-radar-next" data-icon="chevronUp" style="transform:rotate(90deg)"></button>
-        <span id="radar-frame-time" class="hint">Loading…</span>
-      </div>
-      <div class="legend" id="radar-legend"></div>
-    </div>
-  </div>
-
   <div id="map-overlay-blm" class="map-overlay hidden collapsed">
     <div class="map-overlay-header" data-target="map-overlay-blm">
       <span>Public Land Ownership</span>
