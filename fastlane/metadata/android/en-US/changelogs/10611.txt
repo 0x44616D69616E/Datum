@@ -1,0 +1,4 @@
+Storage folder is now chosen with Android's folder picker, fixing setup in
+Documents after a reinstall. Updating? Pick your Datum folder once when asked;
+nothing is moved. Smaller R8-optimized build, new Ko-fi link, and the old
+RainViewer credit is gone.

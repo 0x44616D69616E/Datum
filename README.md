@@ -6,7 +6,7 @@ Datum works entirely offline once you've downloaded a region: satellite imagery,
 
 No account. No analytics. Nothing you record is uploaded anywhere. Your waypoints, routes, and tracks are written to a folder on your own device as standard GPX files, which means they're yours to open in other apps, back up, or share, and they never go anywhere you don't send them.
 
-### [Download Datum v1.6.6 for Android](https://github.com/0x44616D69616E/Datum/releases/download/v1.6.6/datum-1.6.6.apk)
+### [Download Datum v1.6.11 for Android](https://github.com/0x44616D69616E/Datum/releases/download/v1.6.11/datum-1.6.11.apk)
 
 Free, no ads, no account, no subscription, no tracking. 6.4 MB.
 [All releases](https://github.com/0x44616D69616E/Datum/releases) · [Installation help](https://freemaps.org)
@@ -142,7 +142,7 @@ The [User Manual](MANUAL.md) documents everything: every layer, every setting, w
 
 ## Where your data lives
 
-Datum writes your data to a folder on your device as you create it. By default that's `Documents/Datum`, changeable in Settings.
+Datum writes your data to a folder on your device as you create it. You choose the folder once, through Android's own folder picker (Documents is a good home), and Datum keeps everything in a `Datum` folder inside it. No storage permission is requested; picking the folder is what grants access to it.
 
 ```
 Datum/
@@ -251,7 +251,7 @@ The data layer runs one way on purpose: IndexedDB is authoritative and the folde
 
 ## Installing the APK
 
-**[Download Datum v1.6.6](https://github.com/0x44616D69616E/Datum/releases/download/v1.6.6/datum-1.6.6.apk)**, or browse [all releases](https://github.com/0x44616D69616E/Datum/releases).
+**[Download Datum v1.6.11](https://github.com/0x44616D69616E/Datum/releases/download/v1.6.11/datum-1.6.11.apk)**, or browse [all releases](https://github.com/0x44616D69616E/Datum/releases).
 
 Datum isn't distributed through the Play Store, so Android shows two separate warnings the first time you install it:
 
@@ -270,10 +270,10 @@ MIT, see [LICENSE](LICENSE). Provided as-is, with no warranty; see the Terms of 
 
 ## Support
 
-Datum is free with no ads and no subscription. If you want to support the project, there's a [Ko-fi](https://ko-fi.com/corruptedwizards). Bug reports and feature requests through GitHub Issues are just as valuable and always welcome.
+Datum is free with no ads and no subscription. If you want to support the project, there's a [Ko-fi](https://ko-fi.com/digitalalchemy). Bug reports and feature requests through GitHub Issues are just as valuable and always welcome.
 
 ## Credits
 
 - Developed by [0x44616D69616E](https://github.com/0x44616D69616E)
-- Map data: USGS The National Map, OpenTopoMap (CC-BY-SA), Esri/Maxar/Earthstar Geographics, Waymarked Trails, OpenStreetMap contributors, BLM, RainViewer, US Census Bureau, Natural Earth
+- Map data: USGS The National Map, OpenTopoMap (CC-BY-SA), Esri/Maxar/Earthstar Geographics, Waymarked Trails, OpenStreetMap contributors, BLM, US Census Bureau, Natural Earth
 - Built with [Leaflet](https://leafletjs.com/), [leaflet-rotate](https://github.com/Raruto/leaflet-rotate), and [Capacitor](https://capacitorjs.com/)

@@ -34,11 +34,13 @@ Datum asks two things the first time you open it.
 
 **Offline notice.** A reminder that map data has to be downloaded before you lose signal. Tap OK.
 
-**Storage folder.** Datum writes your waypoints, routes and tracks to a folder on your device as standard GPX files. It defaults to `Documents/Datum`, which needs no setup. You can pick somewhere else, or tap "Later" and set it in Settings when you want.
+**Storage folder.** Datum writes your waypoints, routes and tracks to a folder on your device as standard GPX files. Tap **Choose folder** and Android's own folder picker opens, starting in Documents. Pick a folder and Datum creates a `Datum` folder inside it. If the folder you pick is already called `Datum`, Datum uses it directly. Or tap **Not now** and choose one in Settings whenever you want.
 
-If you skip storage setup, everything still works. Your data lives in the app and nothing is lost; it just is not written out as files until you choose a folder.
+If you skip storage setup, everything still works. Your data lives in the app and nothing is lost; it just is not written out as files until you choose a folder. As soon as you do, everything already in Datum is written out to it.
 
-Datum doesn't request any special storage permission for this. Choosing Documents or Download writes there directly; importing a GPX file from elsewhere goes through Android's own system file picker, which grants access to just the file you pick.
+Datum doesn't request any storage permission. Picking the folder is what grants Datum access to it, and to nothing else on your device. Importing a GPX file from elsewhere works the same way, through Android's own file picker, which grants access to just the file you pick.
+
+**Updating from 1.6.10 or earlier?** Older versions wrote to `Documents/Datum` or `Download/Datum` directly. On first launch after updating, Datum asks you to choose the folder once. Pick your existing Datum folder and it carries on exactly where it left off. Nothing on disk is moved or deleted.
 
 ---
 
@@ -506,7 +508,7 @@ If Datum cannot write to your storage folder, **the menu button turns red with a
 Open the Data sheet and you will see what did not save, with two buttons:
 
 - **Try again** retries everything outstanding. It recreates the storage folder first, since the usual cause is a folder that went away.
-- **Check storage permissions** opens Android's permission screen for Datum.
+- **Choose folder again** reopens the folder picker. If Datum lost access to the folder (it was moved, access was revoked, or the app's data was cleared), picking it again restores access, and then everything outstanding is written.
 
 Datum remembers what still needs writing, **even if you close the app**, because storage being unavailable often outlasts the session that hit it.
 

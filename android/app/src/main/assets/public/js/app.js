@@ -319,14 +319,23 @@ function refreshStorageUI() {
     statusText.textContent = 'Storage setup isn\'t available in this environment.';
     return;
   }
+  const setupBtn = document.getElementById('btn-setup-storage');
   if (Storage.isStorageConfigured()) {
     // Straight from the stored configuration. Inferring this from the
     // directory constant alone reported a folder the files were not in.
     statusText.textContent = `Storage is set up at ${Storage.getConfiguredPathLabel()}. Map tiles stay cached separately and aren't part of backups - they can always be re-downloaded.`;
+    setupBtn.textContent = 'Change folder';
     backupActions.classList.remove('hidden');
     refreshBackupFilesList();
+  } else if (Storage.needsFolderRepick()) {
+    // Upgraded from 1.6.10 or earlier, which wrote by raw path. Nothing on disk
+    // was moved or deleted; Datum just needs the folder chosen once.
+    statusText.textContent = 'Datum now uses Android\'s folder picker for storage. Choose your Datum folder again to keep writing there. Your existing files have not been moved or deleted.';
+    setupBtn.textContent = 'Choose folder';
+    backupActions.classList.add('hidden');
   } else {
-    statusText.textContent = 'Not set up yet. This creates a Datum folder for your backups and for the shareable files Datum writes.';
+    statusText.textContent = 'Not set up yet. Choose a folder and Datum creates a Datum folder inside it for your backups and the shareable files it writes.';
+    setupBtn.textContent = 'Choose folder';
     backupActions.classList.add('hidden');
   }
 }
@@ -362,34 +371,31 @@ async function refreshBackupFilesList() {
   });
 }
 
-function askStorageFolder() {
-  return new Promise((resolve) => {
-    openDialog('dialog-storage-folder');
-    const docsBtn = document.getElementById('btn-folder-documents');
-    const dlBtn = document.getElementById('btn-folder-downloads');
-    const cleanup = () => { docsBtn.onclick = null; dlBtn.onclick = null; closeOverlay('dialog-storage-folder'); };
-    docsBtn.onclick = () => { cleanup(); resolve({ directory: 'DOCUMENTS', relativePath: '', label: 'Documents/Datum' }); };
-    // relativePath must be 'Download' here. EXTERNAL_STORAGE is the storage
-    // root, so an empty path wrote to /storage/emulated/0/Datum while telling
-    // the user it was in Downloads.
-    dlBtn.onclick = () => { cleanup(); resolve({ directory: 'EXTERNAL_STORAGE', relativePath: Storage.DOWNLOADS_RELATIVE_PATH, label: 'Download/Datum' }); };
-    // Backdrop tap leaves the folder unchanged. Callers treat null as "no
-    // selection made" already.
-    dialogDismissHandlers.set('dialog-storage-folder', () => { cleanup(); resolve(null); });
-  });
-}
-
-document.getElementById('btn-setup-storage').onclick = async () => {
-  const picked = await askStorageFolder();
-  if (!picked) return; // cancelled
+// Opens Android's folder picker. On success, everything already in Datum is
+// written out straight away, so the folder is complete immediately rather
+// than filling in one edit at a time. Returns true if a folder was set.
+async function chooseStorageFolderFlow() {
   try {
-    await Storage.setupStorage(picked.directory, picked.relativePath);
-    logInfo(`Storage set up at ${picked.label}.`);
+    const label = await Storage.chooseStorageFolder();
+    if (!label) return false; // backed out of the picker
+    logInfo(`Storage set up at ${label}.`);
     refreshStorageUI();
+    try {
+      const { written } = await Mirror.rebuildMirror();
+      logInfo(`Wrote ${written} file(s) to ${label}.`);
+    } catch (e) {
+      logError(`Storage is set up, but writing existing data to it failed: ${e.message}`);
+    }
+    renderStorageHealth();
+    return true;
   } catch (e) {
     logError(`Failed to set up storage: ${e.message}`);
+    await showAlert('Could not use that folder', e.message);
+    return false;
   }
-};
+}
+
+document.getElementById('btn-setup-storage').onclick = () => chooseStorageFolderFlow();
 
 document.getElementById('btn-export-backup').onclick = async () => {
   try {
@@ -416,18 +422,23 @@ document.getElementById('btn-onboarding-offline-ok').onclick = () => {
     setTimeout(() => openDialog('dialog-onboarding-storage'), 250);
   }
 };
+// Upgrading from 1.6.10 or earlier leaves no folder grant (those versions wrote
+// by raw path), so mirroring quietly stops until a folder is chosen. Said once
+// on launch rather than left for the user to discover in Settings. A fresh
+// install never has the old setting, so this never shows for new users.
+if (Storage.needsFolderRepick() && !localStorage.getItem('storageRepickPrompted')) {
+  localStorage.setItem('storageRepickPrompted', 'true');
+  document.getElementById('onboarding-storage-title').textContent = 'Choose your Datum folder again';
+  document.getElementById('onboarding-storage-text').textContent =
+    'Datum now uses Android\'s own folder picker for storage, which needs you to choose the folder once. '
+    + 'Pick your existing Datum folder (usually Documents/Datum) to carry on where you left off. '
+    + 'Nothing has been moved or deleted, and everything in the app is safe either way.';
+  setTimeout(() => openDialog('dialog-onboarding-storage'), 400);
+}
 document.getElementById('btn-onboarding-storage-later').onclick = () => closeOverlay('dialog-onboarding-storage');
 document.getElementById('btn-onboarding-storage-setup').onclick = async () => {
   closeOverlay('dialog-onboarding-storage');
-  const picked = await askStorageFolder();
-  if (!picked) return; // cancelled
-  try {
-    await Storage.setupStorage(picked.directory, picked.relativePath);
-    logInfo(`Storage set up at ${picked.label}.`);
-    refreshStorageUI();
-  } catch (e) {
-    logError(`Failed to set up storage: ${e.message}`);
-  }
+  await chooseStorageFolderFlow();
 };
 
 // ---------- In-app prompts (replace window.prompt/confirm) ----------
@@ -1062,7 +1073,7 @@ document.getElementById('btn-save-layer-preset').onclick = async () => {
 // whose name already exists is left alone rather than silently overwriting a
 // preset the user has of their own.
 document.getElementById('btn-load-presets-from-folder').onclick = async () => {
-  await Storage.ensureStorageRoot();
+  await Storage.ensureStorageRoot({ prompt: true });
   let result;
   try {
     result = await Storage.readPresetFiles();
@@ -1116,22 +1127,19 @@ Mirror.onMirrorHealthChange(renderStorageHealth);
 renderStorageHealth();
 
 document.getElementById('btn-storage-permissions').onclick = async () => {
-  // Datum no longer declares any special storage permission (Documents and
-  // Download both work without one), so this is a generic escape hatch
-  // rather than a specific permission grant - a write can still fail for
-  // reasons outside Datum's control (a device policy, storage genuinely
-  // removed, etc.), and Android's own app-info screen is the place to check.
+  // Storage is a folder grant, so when writes fail because access was lost
+  // (revoked in system settings, app data cleared, the folder moved), the fix
+  // is choosing the folder again, not a permission screen. Picking the same
+  // folder re-grants it; the pending writes are then retried.
   if (!Storage.isDocumentPickerAvailable()) {
-    await showAlert('Not available', 'Open Android Settings, find Datum under Apps, and check its storage permissions.');
+    await showAlert('Not available', 'The folder picker is not available on this device.');
     return;
   }
-  try {
-    await Storage.openAppSettings();
-    showToast('Check storage permissions, then come back and tap Try again.');
-  } catch (e) {
-    logError(`Could not open settings: ${e.message}`);
-    await showAlert('Could not open settings', 'Open Android Settings, find Datum under Apps, and check its storage permissions.');
-  }
+  if (!(await chooseStorageFolderFlow())) return;
+  const { fixed, failed } = await Mirror.retryPendingWrites();
+  renderStorageHealth();
+  if (failed === 0) showToast(`Folder set. ${fixed} file(s) written.`);
+  else await showAlert('Still failing', `${fixed} written, ${failed} still could not be saved.`);
 };
 
 document.getElementById('btn-storage-retry').onclick = async () => {
@@ -1142,7 +1150,7 @@ document.getElementById('btn-storage-retry').onclick = async () => {
     // Recreated first: the usual cause is a folder that went away, and
     // retrying writes into a directory that still does not exist would fail
     // for the same reason every time.
-    await Storage.ensureStorageRoot();
+    await Storage.ensureStorageRoot({ prompt: true });
     const { fixed, failed } = await Mirror.retryPendingWrites();
     renderStorageHealth();
     if (failed === 0) {
@@ -1150,7 +1158,7 @@ document.getElementById('btn-storage-retry').onclick = async () => {
       logInfo(`Storage retry: ${fixed} written, none outstanding.`);
     } else {
       await showAlert('Still failing',
-        `${fixed} written, ${failed} still could not be saved. Check that the storage folder in Settings still exists and that Datum has permission to write to it.`);
+        `${fixed} written, ${failed} still could not be saved. If the folder was moved or Datum lost access to it, tap "Choose folder again".`);
     }
   } catch (e) {
     logError(`Storage retry failed: ${e.message}`);
@@ -1261,7 +1269,7 @@ document.getElementById('btn-package-session').onclick = async () => {
     return;
   }
   try {
-    await Storage.ensureStorageRoot();
+    await Storage.ensureStorageRoot({ prompt: true });
     // The mirror writes per record as you go, so a queued write could still be
     // in flight. Flushing first means the package cannot miss a record that
     // was added a moment ago.
@@ -1291,7 +1299,7 @@ document.getElementById('btn-package-session').onclick = async () => {
 // without asking.
 document.getElementById('btn-tidy-storage').onclick = async () => {
   try {
-    await Storage.ensureStorageRoot();
+    await Storage.ensureStorageRoot({ prompt: true });
     const found = await Storage.findLegacyLeftovers();
     if (!found.total) {
       await showAlert('Nothing to tidy', 'Your storage folder is already using the current layout.');
@@ -1593,7 +1601,7 @@ document.getElementById('btn-import-browse').onclick = pickAndImportGpx;
 
 document.getElementById('btn-sync-storage').onclick = async () => {
   try {
-    await Storage.ensureStorageRoot();
+    await Storage.ensureStorageRoot({ prompt: true });
     const found = await Share.scanForUnknownFiles();
     const recordCount = found.newRecords.length;
     const folderCount = found.newSessionFolders.length;
@@ -4060,7 +4068,7 @@ persistRecordToggle.addEventListener('change', () => {
 updateRecordButtonPlacement();
 
 document.getElementById('btn-support').onclick = () => {
-  window.open('https://ko-fi.com/corruptedwizards', '_blank', 'noopener');
+  window.open('https://ko-fi.com/digitalalchemy', '_blank', 'noopener');
 };
 document.getElementById('btn-start-record-yes').onclick = () => { closeOverlay('dialog-start-record'); startRecording(); };
 document.getElementById('btn-start-record-no').onclick = () => closeOverlay('dialog-start-record');

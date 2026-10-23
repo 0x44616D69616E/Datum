@@ -2,6 +2,44 @@
 
 All notable changes to Datum are documented here.
 
+## v1.6.11
+
+### Changed
+
+- **The storage folder is now chosen with Android's own folder picker.**
+  Picking a folder grants Datum access to that folder, and nothing else;
+  Datum still requests no storage permission. Datum keeps its files in a
+  `Datum` folder inside the one you pick, or uses the folder directly if it
+  is already called `Datum`. Once a folder is chosen, everything already in
+  the app is written out to it straight away.
+- **If you are updating, choose your folder once.** 1.6.10 and earlier wrote
+  to `Documents/Datum` or `Download/Datum` by direct path. Datum asks once on
+  first launch; pick your existing Datum folder and it carries on where it
+  left off. Nothing on disk is moved or deleted.
+- **Release builds are now shrunk and optimized with R8.** Unused code and
+  resources are stripped from the APK, so it is smaller. No change to how
+  the app behaves.
+- **The Support / Tip link now points to the new Ko-fi page**
+  (`ko-fi.com/digitalalchemy`), both in the app and in the README.
+
+### Fixed
+
+- **Setting up storage in Documents failed** if a `Documents/Datum` folder
+  was already there from an earlier install. Since 1.6.10 dropped the
+  all-files permission, Android only let Datum change files created by the
+  same installation, and a reinstall (including the switch to the release
+  signing key in 1.6.3) left the old folder's files locked. Download, a
+  fresh folder, worked. A picked folder covers every file in it, whoever
+  created it.
+
+### Removed
+
+- **The Documents / Download folder buttons** are replaced by the system
+  folder picker, which opens in Documents.
+- **RainViewer dropped from the map data credits**, in the app's About
+  section and in the README. It was only there for the Weather Radar layer,
+  which was removed in v1.6.10.
+
 ## v1.6.10
 
 ### Removed
