@@ -166,9 +166,9 @@
       <div id="storage-alert" class="storage-alert hidden">
       <div class="storage-alert-title">Some files could not be written</div>
       <div class="hint" id="storage-alert-detail"></div>
-      <div class="hint">The usual cause is Datum losing permission to write to storage, or the folder being moved or deleted.</div>
+      <div class="hint">The usual cause is Datum losing access to the storage folder, or the folder being moved or deleted. Choosing the folder again restores access.</div>
       <button id="btn-storage-retry" class="btn-danger full-width">Try again</button>
-      <button id="btn-storage-permissions" class="btn-secondary full-width">Check storage permissions</button>
+      <button id="btn-storage-permissions" class="btn-secondary full-width">Choose folder again</button>
     </div>
 
     <div class="button-row">
@@ -333,7 +333,7 @@
     <div class="data-section">
       <h3>Storage</h3>
       <p class="hint" id="storage-status-text">Checking storage status…</p>
-      <button id="btn-setup-storage" class="btn-primary full-width">Set up storage</button>
+      <button id="btn-setup-storage" class="btn-primary full-width">Choose folder</button>
       <div id="storage-backup-actions" class="hidden" style="margin-top:12px;">
         <div class="button-row">
           <button id="btn-export-backup" class="btn-secondary">Export backup</button>
@@ -360,7 +360,7 @@
       <h3>About Datum</h3>
       <p class="hint">A fully offline topo, satellite, and trail map. Free, open source under the MIT licence, with no account, no ads, and nothing sent anywhere.</p>
       <p class="hint">Built by <a href="https://github.com/0x44616D69616E" target="_blank" rel="noopener noreferrer">0x44616D69616E</a> &middot; <a href="https://github.com/0x44616D69616E/Datum" target="_blank" rel="noopener noreferrer">Source on GitHub</a></p>
-      <p class="hint">Map data: USGS The National Map, OpenTopoMap (CC-BY-SA), Esri, Maxar, Earthstar Geographics, Waymarked Trails, OpenStreetMap contributors, BLM Surface Management Agency, RainViewer, US Census Bureau, Natural Earth.</p>
+      <p class="hint">Map data: USGS The National Map, OpenTopoMap (CC-BY-SA), Esri, Maxar, Earthstar Geographics, Waymarked Trails, OpenStreetMap contributors, BLM Surface Management Agency, US Census Bureau, Natural Earth.</p>
       <button id="btn-support" class="btn-support full-width"><span class="btn-support-icon" data-icon="heart"></span><span class="btn-support-label">Tip the developer</span><span class="btn-support-icon" data-icon="heart"></span></button>
       <p class="hint">Datum is free and always will be, with no ads and no account. A tip is never expected. Bug reports and feature requests through GitHub Issues are worth just as much.</p>
     </div>
@@ -377,22 +377,11 @@
 </div>
 
 <div id="dialog-onboarding-storage" class="dialog dialog-centered hidden">
-  <h2>Choose a storage folder?</h2>
-  <p class="hint" style="font-size:14.5px; color: var(--text);">Datum saves your flags, routes and tracks as standard GPX files you can open in other apps, back up, or share. These go in <b>Documents/Datum</b> unless you pick somewhere else. You can change this any time in Settings.</p>
+  <h2 id="onboarding-storage-title">Choose a storage folder?</h2>
+  <p id="onboarding-storage-text" class="hint" style="font-size:14.5px; color: var(--text);">Datum can save your flags, routes and tracks as standard GPX files you can open in other apps, back up, or share. Android will ask you to pick a folder, such as <b>Documents</b>, and Datum creates a <b>Datum</b> folder inside it. Everything still works without one, and you can choose a folder any time in Settings.</p>
   <div class="dialog-actions">
-    <button id="btn-onboarding-storage-later" class="btn-secondary">Use Documents</button>
+    <button id="btn-onboarding-storage-later" class="btn-secondary">Not now</button>
     <button id="btn-onboarding-storage-setup" class="btn-primary">Choose folder</button>
-  </div>
-</div>
-
-<div id="dialog-storage-folder" class="dialog dialog-centered hidden">
-  <h2>Choose a folder</h2>
-  <p class="hint" style="font-size:14.5px; color: var(--text);">Datum will create a "Datum" folder inside whichever one you pick.</p>
-  <div class="dialog-actions">
-    <button id="btn-folder-documents" class="btn-secondary full-width">Documents</button>
-  </div>
-  <div class="dialog-actions">
-    <button id="btn-folder-downloads" class="btn-secondary full-width">Download folder</button>
   </div>
 </div>
 
